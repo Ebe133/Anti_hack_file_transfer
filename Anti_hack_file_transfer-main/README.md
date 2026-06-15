@@ -65,7 +65,7 @@ Het systeem bestaat uit:
 - docs/
   - probleemanalyse.md
   - security-requirements.md
-  - architectuur.md
+  - architectuur.mda
   - technische-keuzes.md
 - README.md
 
