@@ -76,12 +76,5 @@ Het project gebruikt een Scrum-board met:
 - Doing
 - Done
 
-Taken worden verdeeld over development, testing en documentatie.
 
-## Op te leveren (Dag 1)
-- README
-- Probleemanalyse
-- Security requirements
-- Architectuurdocument
-- Technische keuzes
-- Scrumboard
+
