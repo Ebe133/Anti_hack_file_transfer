@@ -2,7 +2,7 @@
 # Bestandstransfersysteem met Beveiliging
 
 ## Projectbeschrijving
-Dit project is een beveiligd bestandstransfersysteem waarmee bestanden tussen een client en server worden verstuurd. De focus ligt op veilige communicatie, authenticatie en databeveiliging tijdens transport.
+Dit project is een beveiligd bestandstransfersysteem waarmee bestanden tussen een client en server worden verstuurd. onze focus ligt op veilige communicatie, authenticatie en databeveiliging tijdens transport. 
 
 ## Doel van het project
 Het doel is om een systeem te bouwen dat bestanden veilig kan verzenden met aandacht voor:
