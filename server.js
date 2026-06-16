@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const bytes = require('bytes'); // turns human sizes like '10MB' into a byte count
+const time = require('time');
 
 const poort = Number(process.argv[2]);
 if (!poort) {
@@ -16,7 +17,7 @@ const ontvangMap = path.join(__dirname, 'received');
 fs.mkdirSync(ontvangMap, { recursive: true });
 
 const AUTO_BESTANDSGROOTTE = bytes('10MB');    // up to this size: accepted automatically
-const MAX_TIJDSVERSCHIL = 60 * 1000;          // 60 seconds: accepted automatically
+const MAX_TIJDSVERSCHIL = time('1 min');          // 60 seconds: accepted automatically
 
 // This server only ever accepts a single upload, then shuts itself down.
 let bestandOntvangen = false;
@@ -118,7 +119,7 @@ function ontvangUpload(socket, metadata, eersteStuk, limiet) {
   let ontvangen = 0;
   let afgebroken = false;
 
-  doel.on('error', () => {}); // swallow write errors once things have been torn down
+  doel.on('error', () => { }); // swallow write errors once things have been torn down
 
   function verwerk(stuk) {
     if (afgebroken) return;
