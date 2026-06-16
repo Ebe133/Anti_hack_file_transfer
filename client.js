@@ -2,94 +2,132 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 
-// You need all four things after "node client.js". If any are missing, show how
-// to use it and stop.
-const [mode, bestand, host, poort] = process.argv.slice(2);
-if (!mode || !bestand || !host || !poort) {
+// Lees de parameters: upload/download, bestandspad, host en poort (bijv. node client.js upload test.txt localhost 8080)
+const [modus, bestand, host, poort] = process.argv.slice(2);
+if (!modus || !bestand || !host || !poort || (modus !== 'upload' && modus !== 'download')) {
   console.log('Gebruik: node client.js <upload|download> <bestand> <host> <poort>');
   process.exit(1);
 }
+const PORT = parseInt(poort, 10);
 
-if (mode === 'upload') {
-  upload(bestand, host, poort);
-} else if (mode === 'download') {
-  download(bestand, host, poort);
-} else {
-  console.log('Onbekende modus: ' + mode + ' (gebruik upload of download)');
-  process.exit(1);
-}
+// Maak verbinding met de TCP-server
+const socket = net.connect({ host, port: PORT }, () => {
+  if (modus === 'upload') {
+    startUpload(socket, bestand);
+  } else if (modus === 'download') {
+    startDownload(socket, bestand);
+  }
+});
 
-function upload(bestand, host, poort) {
-  // Just send the file's name, not the full path on your computer. That way the
-  // server never finds out how your folders are laid out.
-  const naam = path.basename(bestand);
-  // Tell the server how big the file is so it knows how much to wait for.
-  const grootte = fs.statSync(bestand).size;
-  // First you send one line describing the file, then the file itself. It uses
-  // JSON for that line so it's easy to add more details later if you need to.
-  const metadata = JSON.stringify({ mode: 'upload', filename: naam, size: grootte, time: Date.now() });
+// Behandel netwerkfouten centraal
+socket.on('error', e => {
+  console.error('Socket fout:', e.message);
+});
 
-  // allowHalfOpen lets you keep listening after you're done sending. Without it,
-  // the connection would close the moment the file finishes and you'd miss the
-  // server's "done" message.
-  const socket = net.createConnection({ host, port: Number(poort), allowHalfOpen: true }, () => {
-    socket.write(metadata + '\n');
-    // Send the file piece by piece instead of loading it all into memory, so
-    // even a huge file goes through fine.
-    fs.createReadStream(bestand).pipe(socket);
-  });
-  socket.on('data', (stuk) => console.log(stuk.toString().trim()));
-  socket.on('error', (fout) => {
-    console.log('Verbinding mislukt: ' + fout.message);
+// Functie om bestanden te uploaden naar de server
+function startUpload(socket, bestandspad) {
+  if (!fs.existsSync(bestandspad)) {
+    console.error('Bestand niet gevonden:', bestandspad);
+    socket.destroy();
     process.exit(1);
+  }
+
+  const data = fs.readFileSync(bestandspad);
+  const naam = path.basename(bestandspad);
+
+  // Metadata als JSON doorsturen
+  const metadata = JSON.stringify({ 
+    mode: 'upload', 
+    filename: naam, 
+    size: data.length, 
+    time: Date.now() 
+  });
+  
+  socket.write(metadata + '\n');
+  socket.write(data);
+  socket.end(); // Sluit de schrijfzijde zodat de server weet dat we klaar zijn
+
+  // Wacht op de succes-bevestiging van de server
+  socket.on('data', d => {
+    console.log(d.toString().trim());
+    socket.end();
   });
 }
 
-function download(bestand, host, poort) {
-  const naam = path.basename(bestand);
-  const metadata = JSON.stringify({ mode: 'download', filename: naam });
-  const socket = net.createConnection({ host, port: Number(poort) }, () => {
-    socket.write(metadata + '\n');
-  });
-  socket.on('error', (fout) => {
-    console.log('Verbinding mislukt: ' + fout.message);
-    process.exit(1);
-  });
-  // The server first sends a short status message, then the file. Read that
-  // message first.
-  leesRegel(socket, (status, rest) => {
-    if (status !== 'OK') {
-      console.log(status);
-      socket.end();
-      return;
-    }
-    const doel = fs.createWriteStream(naam);
-    // Sometimes a bit of the file arrives together with the status message.
-    // Save that leftover bit first, then let the rest stream in.
-    doel.write(rest);
-    socket.pipe(doel);
-    doel.on('finish', () => console.log('Gedownload: ' + naam));
-  });
-}
+// Functie om bestanden te downloaden van de server
+function startDownload(socket, bestandspad) {
+  const opslagPad = path.resolve(process.cwd(), path.basename(bestandspad));
+  const schrijfStream = fs.createWriteStream(opslagPad);
 
-// Reads the first line of what the server sends; everything after it is the
-// file. The data doesn't always arrive in neat pieces: one delivery might hold
-// only part of the line, or the whole line plus a chunk of the file. So it keeps
-// collecting until it spots the end of the line.
-function leesRegel(socket, klaar) {
-  // Collect the incoming data as raw bytes and keep adding to it. It holds off on
-  // turning it into text, because the file can contain anything and a character
-  // could get split across two deliveries and come out garbled. It only turns the
-  // first line into text once it has the whole line.
+  // Behandel schrijf-fouten naar de disk
+  schrijfStream.on('error', err => {
+    console.error('Bestandsfout:', err.message);
+    socket.destroy();
+    ruimIncompleetBestandOp();
+  });
+
+  // Stuur het downloadverzoek met metadata
+  const metadata = JSON.stringify({ 
+    mode: 'download', 
+    filename: bestandspad 
+  });
+  socket.write(metadata + '\n');
+
+  let bestandGrootte = null;
+  let ontvangenGrootte = 0;
   let buffer = Buffer.alloc(0);
-  socket.on('data', function opData(stuk) {
-    buffer = Buffer.concat([buffer, stuk]);
-    // 10 is the code for the "new line" character. Keep waiting until we see one.
-    const einde = buffer.indexOf(10);
-    if (einde === -1) return;
-    // Stop listening here so the file-saving code below gets all the rest of the
-    // data, instead of both handlers grabbing at it.
-    socket.removeListener('data', opData);
-    klaar(buffer.slice(0, einde).toString(), buffer.slice(einde + 1));
+
+  // Verwerk de binnenkomende bestandsdata
+  socket.on('data', dataBlok => {
+    if (bestandGrootte === null) {
+      buffer = Buffer.concat([buffer, dataBlok]);
+      const index = buffer.indexOf(10); // 10 is de newline (\n)
+      if (index === -1) return;
+
+      const eersteRegel = buffer.slice(0, index).toString();
+      const delen = eersteRegel.split(' ');
+
+      if (delen[0] !== 'SIZE') {
+        console.error('Onverwacht antwoord van server:', eersteRegel);
+        socket.end();
+        ruimIncompleetBestandOp();
+        return;
+      }
+
+      bestandGrootte = parseInt(delen[1], 10);
+      
+      // Schrijf het restant na de SIZE header direct weg
+      const rest = buffer.slice(index + 1);
+      if (rest.length > 0) {
+        schrijfStream.write(rest);
+        ontvangenGrootte += rest.length;
+      }
+      buffer = null; // Buffer legen om geheugen te sparen
+    } else {
+      schrijfStream.write(dataBlok);
+      ontvangenGrootte += dataBlok.length;
+    }
+
+    // Controleer of de download compleet is
+    if (bestandGrootte !== null && ontvangenGrootte >= bestandGrootte) {
+      schrijfStream.end(() => {
+        console.log('Download voltooid. Opgeslagen in:', opslagPad);
+      });
+      socket.end();
+    }
   });
+
+  // Ruim het bestand op als de verbinding voortijdig sluit
+  socket.on('close', () => {
+    if (bestandGrootte === null || ontvangenGrootte < bestandGrootte) {
+      ruimIncompleetBestandOp();
+    }
+  });
+
+  function ruimIncompleetBestandOp() {
+    schrijfStream.destroy();
+    try {
+      fs.rmSync(opslagPad, { force: true });
+    } catch (e) {}
+  }
 }
