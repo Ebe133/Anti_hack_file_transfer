@@ -2,74 +2,55 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 
-// Poort: optioneel argument, standaard 8000
-const PORT = process.argv[2] ? parseInt(process.argv[2]) : 8000;
-const STORAGE_DIR = path.join(__dirname, 'uploads');
-
-if (!fs.existsSync(STORAGE_DIR)) {
-  fs.mkdirSync(STORAGE_DIR, { recursive: true });
+const poort = Number(process.argv[2]);
+if (!poort) {
+  console.log('Gebruik: node server.js <poort>');
+  process.exit(1);
 }
 
-const server = net.createServer(socket => {
-  console.log('Client verbonden');
-  let pending = null; // {type, filename, size, received, chunks}
-  let buffer = Buffer.alloc(0);
+const ontvangMap = path.join(__dirname, 'received');
+fs.mkdirSync(ontvangMap, { recursive: true });
 
-  socket.on('data', data => {
-    buffer = Buffer.concat([buffer, data]);
-    processBuffer();
-  });
+const server = net.createServer({ allowHalfOpen: true }, behandelVerbinding);
+server.listen(poort, () => console.log('Server op poort ' + poort));
 
-  function processBuffer() {
-    if (!pending) {
-      const idx = buffer.indexOf('\n');
-      if (idx === -1) return; // wacht op volledige regel
-      const line = buffer.slice(0, idx).toString().trim();
-      buffer = buffer.slice(idx + 1);
-      const parts = line.split(' ');
-      const cmd = parts[0].toUpperCase();
-
-      if (cmd === 'UPLOAD' && parts.length === 3) {
-        const filename = path.basename(parts[1]);
-        const size = parseInt(parts[2], 10);
-        pending = { type: 'upload', filename, size, received: 0, chunks: [] };
-        processBuffer(); // recursief voor eventuele restdata
-      } else if (cmd === 'DOWNLOAD' && parts.length === 2) {
-        const filename = path.basename(parts[1]);
-        const filePath = path.join(STORAGE_DIR, filename);
-        if (!fs.existsSync(filePath)) {
-          socket.write('ERROR NotFound\n');
-          socket.end();
-          return;
-        }
-        const stat = fs.statSync(filePath);
-        socket.write(`SIZE ${stat.size}\n`);
-        const readStream = fs.createReadStream(filePath);
-        readStream.pipe(socket);
-        readStream.on('end', () => socket.end());
-      } else {
-        socket.write('ERROR UnknownCommand\n');
-        socket.end();
-      }
-    } else if (pending.type === 'upload') {
-      const remaining = pending.size - pending.received;
-      const chunk = buffer.slice(0, remaining);
-      pending.chunks.push(chunk);
-      pending.received += chunk.length;
-      buffer = buffer.slice(chunk.length);
-      if (pending.received === pending.size) {
-        const fileData = Buffer.concat(pending.chunks);
-        const filePath = path.join(STORAGE_DIR, pending.filename);
-        fs.writeFileSync(filePath, fileData);
-        socket.write('OK\n');
-        pending = null;
-        processBuffer();
-      }
+function behandelVerbinding(socket) {
+  leesRegel(socket, (regel, rest) => {
+    const [mode, bestand] = regel.split(' ');
+    if (mode === 'upload') {
+      ontvangUpload(socket, bestand, rest);
+    } else if (mode === 'download') {
+      verstuurDownload(socket, bestand);
+    } else {
+      socket.end('FOUT onbekend commando: ' + mode + '\n');
     }
-  }
+  });
+}
 
-  socket.on('end', () => console.log('Client verbroken'));
-  socket.on('error', err => console.error('Socket fout:', err));
-});
+function ontvangUpload(socket, bestand, eersteStuk) {
+  const doel = fs.createWriteStream(path.join(ontvangMap, bestand));
+  doel.write(eersteStuk);
+  socket.pipe(doel);
+  doel.on('finish', () => socket.end('OK geüpload: ' + bestand + '\n'));
+}
 
-server.listen(PORT, () => console.log(`Eenvoudige server luistert op poort ${PORT}`));
+function verstuurDownload(socket, bestand) {
+  const bron = fs.createReadStream(path.join(ontvangMap, bestand));
+  bron.on('error', () => socket.end('FOUT niet gevonden: ' + bestand + '\n'));
+  bron.on('open', () => {
+    socket.write('OK\n');
+    bron.pipe(socket);
+  });
+}
+
+// Leest één regel (tot de eerste \n) uit de stream; de rest zijn al bestandsbytes.
+function leesRegel(socket, klaar) {
+  let buffer = Buffer.alloc(0);
+  socket.on('data', function opData(stuk) {
+    buffer = Buffer.concat([buffer, stuk]);
+    const einde = buffer.indexOf(10);
+    if (einde === -1) return;
+    socket.removeListener('data', opData);
+    klaar(buffer.slice(0, einde).toString(), buffer.slice(einde + 1));
+  });
+}
