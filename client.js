@@ -1,7 +1,7 @@
-const net = require('net');
-const fs = require('fs');
+const net = require('net'); //het word gebruikt om een TCP-verbinding te maken.
+const fs = require('fs'); //fs word gebruikt om bestanden te lezen en schrijven. 
 const path = require('path');
-
+//tcp-verbindingen zorgt voor communicatie tussen client en server js.
 const [mode, bestand, host, poort] = process.argv.slice(2);
 if (!mode || !bestand || !host || !poort) {
   console.log('Gebruik: node client.js <upload|download> <bestand> <host> <poort>');
