@@ -15,3 +15,4 @@ node client.js upload <bestand> <host> <poort>
 # Download een bestand
 node client.js download <bestand> <host> <poort>
 ```
+(both are kind of a client just sever is to reciever client is sender)
