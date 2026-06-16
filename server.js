@@ -16,18 +16,17 @@ const ontvangMap = path.join(__dirname, 'received');
 fs.mkdirSync(ontvangMap, { recursive: true });
 
 const AUTO_BESTANDSGROOTTE = bytes('10MB');    // up to this size: accepted automatically
-const MAX_TIJDSVERSCHIL = 60 * 1000;          // 60 seconden: accepted automatically
+const MAX_TIJDSVERSCHIL = 60 * 1000;          // 60 seconds: accepted automatically
 
 // This server only ever accepts a single upload, then shuts itself down.
 let bestandOntvangen = false;
 
-// allowHalfOpen lets the server keep writing the reply after the client signals
-// it's done sending, which is exactly how the upload handshake ends.
+// allowHalfOpen makes sure that the server can only recieve files and not send.
 const server = net.createServer({ allowHalfOpen: true }, behandelVerbinding);
 server.listen(poort, () => console.log('Server op poort ' + poort));
 
 function behandelVerbinding(socket) {
-  // Eén bestand per server: na een geslaagde upload accepteer je niets meer.
+  // One file per server: after a successful upload, nothing more is accepted.
   if (bestandOntvangen) {
     socket.end('FOUT server accepteert geen uploads meer\n');
     return;
