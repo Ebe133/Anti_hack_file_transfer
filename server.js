@@ -80,15 +80,27 @@ function valideerMetadata(metadata) {
 }
 
 // Asks the person running the server whether to accept an oversized upload.
-// Replies with true only when they answer yes (j/ja/y/yes).
+// Replies with true only on a clear yes (j/ja/y/yes) and false only on a clear
+// no (n/nee/no). Anything else is ambiguous, so we re-ask instead of silently
+// treating it as a rejection.
 function vraagToestemming(metadata, klaar) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const vraag = 'Upload "' + metadata.filename + '" is ' + bytes(metadata.size) +
     ' (groter dan ' + bytes(AUTO_BESTANDSGROOTTE) + '). Accepteren? (j/n) ';
-  rl.question(vraag, (antwoord) => {
-    rl.close();
-    klaar(/^(j|ja|y|yes)$/i.test(antwoord.trim()));
+  const stel = () => rl.question(vraag, (antwoord) => {
+    const tekst = antwoord.trim();
+    if (/^(j|ja|y|yes)$/i.test(tekst)) {
+      rl.close();
+      klaar(true);
+    } else if (/^(n|nee|no)$/i.test(tekst)) {
+      rl.close();
+      klaar(false);
+    } else {
+      console.log('Antwoord met j (ja) of n (nee).');
+      stel();
+    }
   });
+  stel();
 }
 
 // Blocks path tricks like ../ or an absolute path, so a filename can't escape
