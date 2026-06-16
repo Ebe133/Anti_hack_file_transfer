@@ -1,5 +1,6 @@
 # Simple File Transfer
 
+# How to run
 ## Server
 ```bash
 # Start de server (poort optioneel, standaard 8000)
