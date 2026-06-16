@@ -19,17 +19,28 @@ if (mode === 'upload') {
 
 function upload(bestand, host, poort) {
   const naam = path.basename(bestand);
+  const grootte = fs.statSync(bestand).size;
+  const metadata = JSON.stringify({ mode: 'upload', filename: naam, size: grootte, time: Date.now() });
   const socket = net.createConnection({ host, port: Number(poort), allowHalfOpen: true }, () => {
-    socket.write('upload ' + naam + '\n');
+    socket.write(metadata + '\n');
     fs.createReadStream(bestand).pipe(socket);
   });
   socket.on('data', (stuk) => console.log(stuk.toString().trim()));
+  socket.on('error', (fout) => {
+    console.log('Verbinding mislukt: ' + fout.message);
+    process.exit(1);
+  });
 }
 
 function download(bestand, host, poort) {
   const naam = path.basename(bestand);
+  const metadata = JSON.stringify({ mode: 'download', filename: naam });
   const socket = net.createConnection({ host, port: Number(poort) }, () => {
-    socket.write('download ' + naam + '\n');
+    socket.write(metadata + '\n');
+  });
+  socket.on('error', (fout) => {
+    console.log('Verbinding mislukt: ' + fout.message);
+    process.exit(1);
   });
   leesRegel(socket, (status, rest) => {
     if (status !== 'OK') {
@@ -44,7 +55,7 @@ function download(bestand, host, poort) {
   });
 }
 
-// Leest één regel (tot de eerste \n) uit de stream; de rest zijn al bestandsbytes.
+// Leest een regel (tot de eerste \n) uit de stream; de rest zijn al bestandsbytes.
 function leesRegel(socket, klaar) {
   let buffer = Buffer.alloc(0);
   socket.on('data', function opData(stuk) {
