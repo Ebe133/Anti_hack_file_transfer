@@ -2,62 +2,56 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 
-// Gebruik: node client.js <upload|download> <bestand> <host> <poort>
 const [mode, bestand, host, poort] = process.argv.slice(2);
 if (!mode || !bestand || !host || !poort) {
   console.log('Gebruik: node client.js <upload|download> <bestand> <host> <poort>');
   process.exit(1);
 }
-const PORT = parseInt(poort, 10);
 
 if (mode === 'upload') {
-  if (!fs.existsSync(bestand)) {
-    console.error('Bestand niet gevonden:', bestand);
-    process.exit(1);
-  }
-  const data = fs.readFileSync(bestand);
-  const naam = path.basename(bestand);
-  const socket = net.connect({ host, port: PORT }, () => {
-    socket.write(`UPLOAD ${naam} ${data.length}\n`);
-    socket.write(data);
-  });
-  socket.on('data', d => {
-    console.log(d.toString().trim());
-    socket.end();
-  });
-  socket.on('error', e => console.error('Socket fout:', e));
+  upload(bestand, host, poort);
 } else if (mode === 'download') {
-  const socket = net.connect({ host, port: PORT }, () => {
-    socket.write(`DOWNLOAD ${bestand}\n`);
-  });
-  let grootte = null;
-  let buffer = Buffer.alloc(0);
-  const out = fs.createWriteStream(path.basename(bestand));
-  socket.on('data', d => {
-    if (grootte === null) {
-      const idx = d.indexOf('\n');
-      if (idx === -1) return;
-      const line = d.slice(0, idx).toString();
-      const parts = line.split(' ');
-      if (parts[0] !== 'SIZE') {
-        console.error('Onverwacht antwoord:', line);
-        socket.end();
-        return;
-      }
-      grootte = parseInt(parts[1], 10);
-      buffer = Buffer.concat([buffer, d.slice(idx + 1)]);
-    } else {
-      buffer = Buffer.concat([buffer, d]);
-    }
-    if (grootte !== null && buffer.length >= grootte) {
-      out.write(buffer.slice(0, grootte));
-      out.end();
-      console.log('Download voltooid');
-      socket.end();
-    }
-  });
-  socket.on('error', e => console.error('Socket fout:', e));
+  download(bestand, host, poort);
 } else {
-  console.error('Onbekende modus:', mode);
+  console.log('Onbekende modus: ' + mode + ' (gebruik upload of download)');
   process.exit(1);
+}
+
+function upload(bestand, host, poort) {
+  const naam = path.basename(bestand);
+  const socket = net.createConnection({ host, port: Number(poort), allowHalfOpen: true }, () => {
+    socket.write('upload ' + naam + '\n');
+    fs.createReadStream(bestand).pipe(socket);
+  });
+  socket.on('data', (stuk) => console.log(stuk.toString().trim()));
+}
+
+function download(bestand, host, poort) {
+  const naam = path.basename(bestand);
+  const socket = net.createConnection({ host, port: Number(poort) }, () => {
+    socket.write('download ' + naam + '\n');
+  });
+  leesRegel(socket, (status, rest) => {
+    if (status !== 'OK') {
+      console.log(status);
+      socket.end();
+      return;
+    }
+    const doel = fs.createWriteStream(naam);
+    doel.write(rest);
+    socket.pipe(doel);
+    doel.on('finish', () => console.log('Gedownload: ' + naam));
+  });
+}
+
+// Leest één regel (tot de eerste \n) uit de stream; de rest zijn al bestandsbytes.
+function leesRegel(socket, klaar) {
+  let buffer = Buffer.alloc(0);
+  socket.on('data', function opData(stuk) {
+    buffer = Buffer.concat([buffer, stuk]);
+    const einde = buffer.indexOf(10);
+    if (einde === -1) return;
+    socket.removeListener('data', opData);
+    klaar(buffer.slice(0, einde).toString(), buffer.slice(einde + 1));
+  });
 }
