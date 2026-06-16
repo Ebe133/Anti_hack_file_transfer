@@ -70,7 +70,7 @@ function behandelVerbinding(socket) {
   });
 }
 
-// Vets the metadata before anything is accepted. Returns a reason on rejection, else null.
+// Validates the metadata before anything is accepted. Returns a reason on rejection, else null.
 function valideerMetadata(metadata) {
   if (!veiligeBestandsnaam(metadata.filename)) return 'ongeldige bestandsnaam';
   // No upper bound here: large files aren't rejected, they're sent for approval.
