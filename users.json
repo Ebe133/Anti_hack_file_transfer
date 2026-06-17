@@ -1,1 +1,6 @@
- 
+ [
+    {
+        "username": "admin",
+        "passwordHash": "$2y$10$..."
+    }
+]  
