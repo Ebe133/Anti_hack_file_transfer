@@ -1,6 +1,4 @@
- [
-    {
-        "username": "admin",
-        "passwordHash": "$2y$10$..."
-    }
-]  
+{
+    "admin": "$2y$10$Kd.ueCtvktA4HLiAJMdKNODzvAjR4WxA3mxXlAzh6mKE8igM5dmz2",
+    "ivo": "$2y$10$mocgDsb\/uQ1YbOtlS1.4HuI4I\/\/jcIt.E4mo7S\/dihbU2jWSzGc4u"
+}
