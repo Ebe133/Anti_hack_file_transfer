@@ -1,6 +1,28 @@
 <?php
 
 $usersFile = __DIR__ . "/users.json";
+$logFile = __DIR__ . "/logs/system.log";
+
+if (!file_exists(__DIR__ . "/logs"))
+{
+    mkdir(__DIR__ . "/logs", 0777, true);
+}
+
+function writeLog($message)
+{
+    global $logFile;
+
+    $line =
+        "[" . date("Y-m-d H:i:s") . "] "
+        . $message
+        . PHP_EOL;
+
+    file_put_contents(
+        $logFile,
+        $line,
+        FILE_APPEND
+    );
+}
 
 if (!file_exists($usersFile))
 {
@@ -30,14 +52,14 @@ switch ($action)
 
         if (isset($users[$username]))
         {
-            die("Gebruikersnaam bestaat al");
+            echo "Deze gebruikersnaam bestaat al.";
+            exit;
         }
 
-        $users[$username] =
-            password_hash(
-                $password,
-                PASSWORD_BCRYPT
-            );
+        $users[$username] = password_hash(
+            $password,
+            PASSWORD_BCRYPT
+        );
 
         file_put_contents(
             $usersFile,
@@ -47,35 +69,39 @@ switch ($action)
             )
         );
 
-        echo "Account aangemaakt";
+        writeLog("ACCOUNT AANGEMAAKT | user=$username");
+
+        echo "Account succesvol aangemaakt.";
         break;
 
     case "login":
 
         if (!isset($users[$username]))
         {
-            die("Onbekende gebruiker");
+            writeLog("MISLUKTE LOGIN | user=$username");
+
+            echo "Gebruikersnaam of wachtwoord is onjuist.";
+            exit;
         }
 
-        if (
-            !password_verify(
-                $password,
-                $users[$username]
-            )
-        )
+        if (!password_verify($password, $users[$username]))
         {
-            die("Verkeerd wachtwoord");
+            writeLog("MISLUKTE LOGIN | user=$username");
+
+            echo "Gebruikersnaam of wachtwoord is onjuist.";
+            exit;
         }
 
-        $token =
-            bin2hex(
-                random_bytes(16)
-            );
+        $token = bin2hex(
+            random_bytes(16)
+        );
 
         $_SESSION["tokens"][$token] = [
             "username" => $username,
             "ip" => $_SERVER["REMOTE_ADDR"]
         ];
+
+        writeLog("LOGIN SUCCESVOL | user=$username");
 
         echo json_encode([
             "success" => true,
@@ -86,16 +112,14 @@ switch ($action)
 
     case "lookup":
 
-        $token =
-            $_POST["token"] ?? "";
+        $token = $_POST["token"] ?? "";
 
-        if (
-            !isset(
-                $_SESSION["tokens"][$token]
-            )
-        )
+        if (!isset($_SESSION["tokens"][$token]))
         {
-            die("Geen geldig token");
+            writeLog("ONGELDIGE LOOKUP | token=$token");
+
+            echo "Je bent niet ingelogd.";
+            exit;
         }
 
         echo json_encode([
@@ -106,5 +130,5 @@ switch ($action)
 
     default:
 
-        echo "Gebruik register, login of lookup";
+        echo "Gebruik register, login of lookup.";
 } 
