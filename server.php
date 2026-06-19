@@ -20,6 +20,8 @@ $userDbFile = __DIR__ . '/users.json';
 
 // In-memory array voor actieve online sessies: username -> [address, token]
 $actieveSessies = [];
+// In-memory array voor bijhouden mislukte inlogpogingen per IP (voor brute-force detectie)
+$mislukteInlogs = [];
 
 if (!file_exists($userDbFile)) {
     file_put_contents($userDbFile, json_encode([]));
@@ -47,7 +49,7 @@ while (true) {
     if ($clientSocket !== false) {
         socket_getpeername($clientSocket, $clientIp);
         try {
-            behandelVerbinding($clientSocket, $clientIp, $userDbFile, $actieveSessies);
+            behandelVerbinding($clientSocket, $clientIp, $userDbFile, $actieveSessies, $mislukteInlogs);
         } catch (Exception $e) {
             echo "Fout bij afhandeling: " . $e->getMessage() . "\n";
             socket_close($clientSocket);
@@ -58,7 +60,7 @@ while (true) {
 /**
  * Behandelt inkomende registratie-, login- en lookup-verzoeken van peers.
  */
-function behandelVerbinding($socket, $ip, $dbFile, &$sessies) {
+function behandelVerbinding($socket, $ip, $dbFile, &$sessies, &$mislukteInlogs) {
     $verzoek = leesRegel($socket);
     if ($verzoek === false) {
         socket_close($socket);
@@ -66,9 +68,46 @@ function behandelVerbinding($socket, $ip, $dbFile, &$sessies) {
     }
     
     $data = json_decode($verzoek, true);
+    if ($verzoek !== '' && $data === null) {
+        echo "[$ip] [HACK POGING] Ongeldige JSON-payload of HTTP-probe ontvangen: " . json_encode($verzoek) . "\n";
+        stuurAntwoord($socket, ['status' => 'error', 'message' => 'Ongeldig JSON-formaat']);
+        return;
+    }
+    
     if (!$data || !isset($data['action'])) {
+        echo "[$ip] Ongeldig verzoekformaat of actie ontbreekt\n";
         stuurAntwoord($socket, ['status' => 'error', 'message' => 'Ongeldig verzoekformaat']);
         return;
+    }
+    
+    // Hack-detectie op gebruikersnaam (indien aanwezig)
+    if (isset($data['username'])) {
+        $checkUser = trim($data['username']);
+        if (!empty($checkUser) && !preg_match('/^[a-zA-Z0-9_\-]+$/', $checkUser)) {
+            echo "[$ip] [HACK POGING] Verdachte/ongeldige tekens in gebruikersnaam: '" . $checkUser . "'\n";
+            stuurAntwoord($socket, ['status' => 'error', 'message' => 'Gebruikersnaam bevat ongeldige tekens']);
+            return;
+        }
+    }
+    
+    // Hack-detectie op session_token (indien aanwezig)
+    if (isset($data['session_token'])) {
+        $checkToken = trim($data['session_token']);
+        if (!empty($checkToken) && !preg_match('/^[0-9a-fA-F]{32}$/', $checkToken)) {
+            echo "[$ip] [HACK POGING] Ongeldig sessietoken formaat gedetecteerd: '" . $checkToken . "'\n";
+            stuurAntwoord($socket, ['status' => 'error', 'message' => 'Ongeldig sessietoken']);
+            return;
+        }
+    }
+    
+    // Hack-detectie op address (indien aanwezig)
+    if (isset($data['address'])) {
+        $checkAddress = trim($data['address']);
+        if (!empty($checkAddress) && preg_match('/[\'"<>;()\\\$]/', $checkAddress)) {
+            echo "[$ip] [HACK POGING] Mogelijk injectie-payload in adres gedetecteerd: '" . $checkAddress . "'\n";
+            stuurAntwoord($socket, ['status' => 'error', 'message' => 'Ongeldig adresformaat']);
+            return;
+        }
     }
     
     $actie = $data['action'];
@@ -81,10 +120,12 @@ function behandelVerbinding($socket, $ip, $dbFile, &$sessies) {
             $pass = $data['password'] ?? '';
             
             if (empty($user) || empty($pass)) {
+                echo "[$ip] Registratie mislukt: Gebruikersnaam of wachtwoord leeg\n";
                 stuurAntwoord($socket, ['status' => 'error', 'message' => 'Gebruikersnaam en wachtwoord zijn verplicht']);
                 break;
             }
             if (isset($gebruikers[$user])) {
+                echo "[$ip] Registratie mislukt: Gebruikersnaam '$user' bestaat al\n";
                 stuurAntwoord($socket, ['status' => 'error', 'message' => 'Gebruikersnaam bestaat al']);
                 break;
             }
@@ -93,7 +134,7 @@ function behandelVerbinding($socket, $ip, $dbFile, &$sessies) {
             $gebruikers[$user] = password_hash($pass, PASSWORD_BCRYPT);
             file_put_contents($dbFile, json_encode($gebruikers, JSON_PRETTY_PRINT));
             
-            echo "Gebruiker geregistreerd: $user\n";
+            echo "[$ip] Gebruiker geregistreerd: $user\n";
             stuurAntwoord($socket, ['status' => 'success', 'message' => 'Account aangemaakt']);
             break;
             
@@ -104,12 +145,22 @@ function behandelVerbinding($socket, $ip, $dbFile, &$sessies) {
             $adres = trim($data['address'] ?? '');
             
             if (!isset($gebruikers[$user]) || !password_verify($pass, $gebruikers[$user])) {
+                if (!isset($mislukteInlogs[$ip])) {
+                    $mislukteInlogs[$ip] = 0;
+                }
+                $mislukteInlogs[$ip]++;
+                
+                if ($mislukteInlogs[$ip] >= 5) {
+                    echo "[$ip] [HACK POGING] Brute-force gedetecteerd voor gebruiker: $user (poging " . $mislukteInlogs[$ip] . ")\n";
+                } else {
+                    echo "[$ip] Mislukte inlogpoging voor: $user\n";
+                }
                 stuurAntwoord($socket, ['status' => 'error', 'message' => 'Ongeldige inloggegevens']);
-                echo "Mislukte inlogpoging voor: $user\n";
                 break;
             }
             
             if (empty($adres)) {
+                echo "[$ip] Inloggen mislukt voor '$user': adres of I2P-bestemming ontbreekt\n";
                 stuurAntwoord($socket, ['status' => 'error', 'message' => 'Adres of I2P-bestemming verplicht']);
                 break;
             }
@@ -121,7 +172,10 @@ function behandelVerbinding($socket, $ip, $dbFile, &$sessies) {
                 'token' => $token
             ];
             
-            echo "Gebruiker ingelogd: $user op adres: $adres\n";
+            // Reset mislukte inlogpogingen bij succesvolle inlog
+            $mislukteInlogs[$ip] = 0;
+            
+            echo "[$ip] Gebruiker ingelogd: $user op adres: $adres\n";
             stuurAntwoord($socket, [
                 'status' => 'success',
                 'session_token' => $token
@@ -135,16 +189,19 @@ function behandelVerbinding($socket, $ip, $dbFile, &$sessies) {
             
             // Valideer of de opzoeker een geldige actieve sessie heeft in het geheugen
             if (!valideerSessie($mijnToken, $sessies)) {
+                echo "[$ip] Lookup mislukt: ongeldig of verlopen sessietoken\n";
                 stuurAntwoord($socket, ['status' => 'error', 'message' => 'Sessie is ongeldig of verlopen']);
                 break;
             }
             
             if (!isset($sessies[$doelGebruiker])) {
+                echo "[$ip] Lookup voor '$doelGebruiker' mislukt: gebruiker is offline\n";
                 stuurAntwoord($socket, ['status' => 'error', 'message' => "Gebruiker '$doelGebruiker' is offline"]);
                 break;
             }
             
             // Geef het geregistreerde adres (IP:poort of I2P .b32.i2p domein) terug
+            echo "[$ip] Lookup succesvol: '$doelGebruiker' opgevraagd door client. Adres: " . $sessies[$doelGebruiker]['address'] . "\n";
             stuurAntwoord($socket, [
                 'status' => 'success',
                 'address' => $sessies[$doelGebruiker]['address']
@@ -152,6 +209,7 @@ function behandelVerbinding($socket, $ip, $dbFile, &$sessies) {
             break;
             
         default:
+            echo "[$ip] Onbekende actie ontvangen: $actie\n";
             stuurAntwoord($socket, ['status' => 'error', 'message' => 'Onbekende actie']);
             break;
     }
