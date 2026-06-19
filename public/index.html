@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Anti Hack File Transfer</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #111; color: #eee; }
+    header { background: #161b22; padding: 16px; border-bottom: 1px solid #333; }
+    h1 { margin: 0; font-size: 1.4rem; }
+    main { display: grid; gap: 16px; padding: 16px; }
+    .panel { background: #1e232b; border: 1px solid #333; border-radius: 12px; padding: 16px; }
+    label { display: block; margin: 12px 0 6px; font-size: 0.95rem; }
+    input, button, select, textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #333; background: #121417; color: #eee; }
+    button { cursor: pointer; background: #2563eb; border-color: #1d4ed8; color: #fff; }
+    button:hover { background: #1d4ed8; }
+    .grid-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .small { font-size: 0.9rem; opacity: 0.75; }
+    .log-box { height: 240px; overflow-y: auto; white-space: pre-wrap; background: #0f131a; }
+    .status { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .status span { padding: 4px 8px; border-radius: 6px; background: #223547; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Anti Hack File Transfer</h1>
+    <div class="status">
+      <span id="status-run">Web UI: offline</span>
+      <span id="status-auth">Auth server: offline</span>
+      <span id="status-users">Online users: 0</span>
+    </div>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>Accounts en status</h2>
+      <div class="grid-two">
+        <div>
+          <label>Gebruikersnaam</label>
+          <input id="reg-username" placeholder="alice" />
+          <label>Wachtwoord</label>
+          <input id="reg-password" type="password" placeholder="********" />
+          <button onclick="registerUser()">Registreer gebruiker</button>
+        </div>
+        <div>
+          <label>Login naam</label>
+          <input id="login-username" placeholder="alice" />
+          <label>Login wachtwoord</label>
+          <input id="login-password" type="password" placeholder="********" />
+          <label>My address</label>
+          <input id="login-address" placeholder="LOCAL_WEB_UI" />
+          <button onclick="loginUser()">Login en registreer</button>
+        </div>
+      </div>
+      <div style="margin-top:16px; display:flex; gap:12px; flex-wrap:wrap;">
+        <button onclick="refreshOnline()">Refresh online users</button>
+        <button onclick="startAuth()">Start auth server</button>
+        <button onclick="stopAuth()">Stop auth server</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Start receiver node</h2>
+      <div class="grid-two">
+        <div>
+          <label>Username</label>
+          <input id="recv-username" placeholder="bob" />
+          <label>Wachtwoord</label>
+          <input id="recv-password" type="password" placeholder="bobpassword" />
+        </div>
+        <div>
+          <label>Local port</label>
+          <input id="recv-port" placeholder="9090" />
+          <label>Auth host</label>
+          <input id="recv-auth-host" placeholder="127.0.0.1" />
+          <label>Auth port</label>
+          <input id="recv-auth-port" placeholder="8000" />
+        </div>
+      </div>
+      <button onclick="startReceiver()">Start receive node</button>
+      <p class="small">Deze knop start de I2P/login flow in de achtergrond en logt het adres.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Verzenden</h2>
+      <label>Doel gebruiker</label>
+      <input id="send-target" placeholder="bob" />
+      <label>Mijn username</label>
+      <input id="send-username" placeholder="alice" />
+      <label>Mijn wachtwoord</label>
+      <input id="send-password" type="password" placeholder="alicepassword" />
+      <label>Selecteer bestand</label>
+      <input id="send-file" type="file" />
+      <button onclick="sendFile()">Send file</button>
+    </section>
+
+    <section class="panel">
+      <h2>Live log</h2>
+      <div class="log-box" id="log-box"></div>
+    </section>
+  </main>
+  <script>
+    async function request(path, method = 'GET', body) {
+      const options = { method, headers: {} };
+      if (body && !(body instanceof FormData)) {
+        options.headers['Content-Type'] = 'application/json';
+        options.body = JSON.stringify(body);
+      } else if (body) {
+        options.body = body;
+      }
+      const res = await fetch(path, options);
+      return res.json();
+    }
+
+    async function updateStatus() {
+      const status = await request('/api/status');
+      document.getElementById('status-run').textContent = 'Web UI: online';
+      document.getElementById('status-auth').textContent = 'Auth server: online';
+      document.getElementById('status-users').textContent = `Online users: ${status.onlineUsers.length}`;
+      document.getElementById('log-box').textContent = status.logs.join('\n');
+    }
+
+    async function registerUser() {
+      const username = document.getElementById('reg-username').value;
+      const password = document.getElementById('reg-password').value;
+      const res = await request('/api/register', 'POST', { username, password });
+      alert(res.status ? 'Register success' : 'Error: ' + res.error);
+      updateStatus();
+    }
+
+    async function loginUser() {
+      const username = document.getElementById('login-username').value;
+      const password = document.getElementById('login-password').value;
+      const address = document.getElementById('login-address').value || 'LOCAL_WEB_UI';
+      const res = await request('/api/login', 'POST', { username, password, address });
+      alert(res.status ? 'Login success' : 'Error: ' + res.error);
+      updateStatus();
+    }
+
+    async function refreshOnline() {
+      const res = await request('/api/online');
+      alert('Online users: ' + res.users.join(', '));
+      updateStatus();
+    }
+
+    async function startAuth() {
+      const res = await request('/api/start-auth', 'POST');
+      alert(res.status || res.error);
+      updateStatus();
+    }
+
+    async function stopAuth() {
+      const res = await request('/api/stop-auth', 'POST');
+      alert(res.status || res.error);
+      updateStatus();
+    }
+
+    async function startReceiver() {
+      const myUsername = document.getElementById('recv-username').value;
+      const myPassword = document.getElementById('recv-password').value;
+      const myPort = document.getElementById('recv-port').value;
+      const authHost = document.getElementById('recv-auth-host').value;
+      const authPort = document.getElementById('recv-auth-port').value;
+      const res = await request('/api/start-receiver', 'POST', { myUsername, myPassword, myPort, authHost, authPort });
+      alert(res.address ? 'Receiver started: ' + res.address : 'Error: ' + res.error);
+      updateStatus();
+    }
+
+    async function sendFile() {
+      const targetUsername = document.getElementById('send-target').value;
+      const myUsername = document.getElementById('send-username').value;
+      const myPassword = document.getElementById('send-password').value;
+      const fileInput = document.getElementById('send-file');
+      if (!fileInput.files.length) return alert('Select a file');
+      const form = new FormData();
+      form.append('file', fileInput.files[0]);
+      form.append('targetUsername', targetUsername);
+      form.append('myUsername', myUsername);
+      form.append('myPassword', myPassword);
+      const res = await request('/api/send', 'POST', form);
+      alert(res.status ? 'Send started' : 'Error: ' + res.error);
+      updateStatus();
+    }
+
+    setInterval(updateStatus, 5000);
+    updateStatus();
+  </script>
+</body>
+</html>
