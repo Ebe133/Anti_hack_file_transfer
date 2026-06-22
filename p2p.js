@@ -46,6 +46,20 @@ const AUTH_IS_HTTPS = parsedAuthUrl ? parsedAuthUrl.protocol === 'https:' : fals
 const LISTEN_PORT = process.env.LISTEN_PORT ? parseInt(process.env.LISTEN_PORT, 10) : 9090;
 const LOG_MAX = 500;
 
+function sanitizeUsernameForPath(username) {
+  return String(username || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+}
+
+function getReceivedDirForUsername(username) {
+  const safeUser = sanitizeUsernameForPath(username);
+  if (!safeUser) return RECEIVED_DIR;
+  return path.join(RECEIVED_DIR, safeUser);
+}
+
+function getCurrentUserReceivedDir() {
+  return getReceivedDirForUsername(webState.username);
+}
+
 // Log bestand — alle berichten worden hierheen geschreven
 const LOG_FILE  = process.env.LOG_FILE ? path.resolve(process.env.LOG_FILE) : path.join(__dirname, 'nexus.log');
 const logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
@@ -91,46 +105,70 @@ function sendAuthRequest(payload, callback, authHost = AUTH_HOST, authPort = AUT
   if (AUTH_USE_HTTP) {
     const transport = AUTH_IS_HTTPS ? https : http;
     const requestData = JSON.stringify(payload);
+    const primaryHost = authHost || AUTH_HOST;
+    const fallbackHost = primaryHost.startsWith('www.') ? primaryHost : `www.${primaryHost}`;
 
-    const req = transport.request({
-      hostname: AUTH_HOST,
-      port: AUTH_PORT_UI,
-      path: AUTH_PATH,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(requestData),
-        'Accept': 'application/json'
-      }
-    }, (res) => {
-      let body = '';
-      res.on('data', chunk => body += chunk.toString());
-      res.on('end', () => {
-        const contentType = String(res.headers['content-type'] || '').toLowerCase();
-        const trimmedBody = body.trim();
+    let completed = false;
+    let triedFallback = false;
 
-        // Sommige gratis hosts (o.a. InfinityFree) geven een JS anti-bot challenge
-        // terug i.p.v. JSON voor server-to-server requests.
-        if (contentType.includes('text/html') || trimmedBody.startsWith('<')) {
-          if (trimmedBody.includes('__test=') || trimmedBody.includes('slowAES.decrypt') || trimmedBody.includes('enable Javascript')) {
-            callback(new Error('Auth server wordt afgeschermd door anti-bot HTML challenge (geen JSON API-respons). Gebruik hosting zonder JS challenge voor API-verkeer.'));
-            return;
+    const finish = (err, parsed) => {
+      if (completed) return;
+      completed = true;
+      callback(err, parsed);
+    };
+
+    const makeRequest = (hostname) => {
+      const req = transport.request({
+        hostname,
+        port: authPort,
+        path: AUTH_PATH,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(requestData),
+          'Accept': 'application/json'
+        }
+      }, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk.toString());
+        res.on('end', () => {
+          const contentType = String(res.headers['content-type'] || '').toLowerCase();
+          const trimmedBody = body.trim();
+
+          // Sommige gratis hosts (o.a. InfinityFree) geven een JS anti-bot challenge
+          // terug i.p.v. JSON voor server-to-server requests.
+          if (contentType.includes('text/html') || trimmedBody.startsWith('<')) {
+            if (trimmedBody.includes('__test=') || trimmedBody.includes('slowAES.decrypt') || trimmedBody.includes('enable Javascript')) {
+              finish(new Error('Auth server wordt afgeschermd door anti-bot HTML challenge (geen JSON API-respons). Gebruik hosting zonder JS challenge voor API-verkeer.'));
+              return;
+            }
           }
-        }
 
-        try {
-          const parsed = JSON.parse(trimmedBody);
-          callback(null, parsed);
-        } catch {
-          const preview = trimmedBody.slice(0, 140).replace(/\s+/g, ' ');
-          callback(new Error(`Ongeldig JSON-antwoord van auth server (HTTP ${res.statusCode || 'n/a'}, content-type: ${contentType || 'onbekend'}, body: ${preview})`));
-        }
+          try {
+            const parsed = JSON.parse(trimmedBody);
+            finish(null, parsed);
+          } catch {
+            const preview = trimmedBody.slice(0, 140).replace(/\s+/g, ' ');
+            finish(new Error(`Ongeldig JSON-antwoord van auth server (HTTP ${res.statusCode || 'n/a'}, content-type: ${contentType || 'onbekend'}, body: ${preview})`));
+          }
+        });
       });
-    });
 
-    req.on('error', (err) => callback(err));
-    req.write(requestData);
-    req.end();
+      req.on('error', (err) => {
+        if (!triedFallback && err && err.code === 'ENOTFOUND' && hostname === primaryHost && fallbackHost !== primaryHost) {
+          triedFallback = true;
+          webLog(`[Auth] DNS lookup mislukt voor ${primaryHost}. Herprobeer via ${fallbackHost}...`);
+          makeRequest(fallbackHost);
+          return;
+        }
+        finish(err);
+      });
+
+      req.write(requestData);
+      req.end();
+    };
+
+    makeRequest(primaryHost);
     return;
   }
 
@@ -555,7 +593,7 @@ function startReceiver(myUsername, sessionToken, myPort, authHost, authPort, bas
         // Helper: schrijf het bestand en start ontvangst
         function doAccept() {
           console.log('[P2P Ontvanger] Overdracht geaccepteerd. Start download...');
-          const ontvangMap = RECEIVED_DIR;
+          const ontvangMap = getCurrentUserReceivedDir();
           fs.mkdirSync(ontvangMap, { recursive: true });
           tempPath = path.join(ontvangMap, veiligeNaam + '.tmp');
 
@@ -1284,7 +1322,7 @@ async function handleWebLogin(req, res) {
       webLog(`[Login] I2P tunnel is nog aan het opstarten op de achtergrond...`);
     }
 
-    fs.mkdirSync(RECEIVED_DIR, { recursive: true });
+    fs.mkdirSync(getCurrentUserReceivedDir(), { recursive: true });
     sendJSON(res, 200, { status: 'success', myBase32Address: webState.myBase32Address });
   });
 }
@@ -1419,11 +1457,15 @@ function handleWebStatus(req, res) {
 
 function handleWebFiles(req, res) {
   try {
-    fs.mkdirSync(RECEIVED_DIR, { recursive: true });
-    const items = fs.readdirSync(RECEIVED_DIR)
+    if (!webState.isOnline || !webState.username)
+      return sendJSON(res, 403, { status: 'error', message: 'Node is niet actief. Log eerst in.' });
+
+    const userReceivedDir = getCurrentUserReceivedDir();
+    fs.mkdirSync(userReceivedDir, { recursive: true });
+    const items = fs.readdirSync(userReceivedDir)
       .filter(f => !f.endsWith('.tmp'))
       .map(f => {
-        const s = fs.statSync(path.join(RECEIVED_DIR, f));
+        const s = fs.statSync(path.join(userReceivedDir, f));
         return { name: f, size: s.size, mtime: s.mtimeMs };
       })
       .sort((a, b) => b.mtime - a.mtime);
@@ -1434,12 +1476,13 @@ function handleWebFiles(req, res) {
 }
 
 function handleWebDownload(req, res) {
+  if (!webState.isOnline || !webState.username) { res.writeHead(403); res.end('Node is niet actief. Log eerst in.'); return; }
   const url = new URL(req.url, `http://localhost:${UI_PORT}`);
   const filename = url.searchParams.get('file');
   if (!filename) { res.writeHead(400); res.end('Missing file parameter.'); return; }
   const safe = path.basename(filename);
   if (!safe || safe.includes('..') || safe !== filename) { res.writeHead(400); res.end('Invalid filename.'); return; }
-  const filePath = path.join(RECEIVED_DIR, safe);
+  const filePath = path.join(getCurrentUserReceivedDir(), safe);
   if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('File not found.'); return; }
   const stat = fs.statSync(filePath);
   res.writeHead(200, {
