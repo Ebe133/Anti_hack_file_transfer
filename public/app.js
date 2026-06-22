@@ -13,6 +13,9 @@
     return;
   }
 
+  // Expose token for non-fetch flows that still need authenticated calls.
+  window.__NEXUS_SESSION_TOKEN = SESSION_TOKEN;
+
   // Intercept window.fetch to automatically attach the session token header
   const _originalFetch = window.fetch.bind(window);
   window.fetch = function(resource, options) {
@@ -178,6 +181,29 @@ function clearSelectedFile() {
   btnSendSubmit.setAttribute('disabled', 'true');
 }
 
+async function downloadReceivedFile(filename) {
+  try {
+    const response = await fetch(`/api/download?file=${encodeURIComponent(filename)}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Download geweigerd (${response.status}): ${errorText.slice(0, 120)}`);
+    }
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    addLocalLog(`Download gestart voor '${filename}'.`, 'system');
+  } catch (err) {
+    addLocalLog(`Download mislukt voor '${filename}': ${err.message}`, 'error');
+  }
+}
+
 // --- API Requests ---
 
 // Register User
@@ -225,9 +251,9 @@ loginForm.addEventListener('submit', async (e) => {
   
   const submitBtn = document.getElementById('btn-login-submit');
   submitBtn.setAttribute('disabled', 'true');
-  submitBtn.textContent = 'INITIALIZING I2P DAEMON...';
+  submitBtn.textContent = 'LOGGING IN...';
   
-  addLocalLog(`Starting Node for '${username}'. Booting I2P Tunnel (this may take up to 2 minutes, please approve any admin/firewall prompts)...`, 'system');
+  addLocalLog(`Logging in user '${username}' on directory server...`, 'system');
 
   try {
     const response = await fetch('/api/login', {
@@ -244,7 +270,7 @@ loginForm.addEventListener('submit', async (e) => {
     if (response.ok && result.status === 'success') {
       enterOnlineState(username, result.myBase32Address);
     } else {
-      addLocalLog(`Initialization failed: ${result.message || 'Unknown error'}`, 'error');
+      addLocalLog(`Login failed: ${result.message || 'Unknown error'}`, 'error');
       submitBtn.removeAttribute('disabled');
       submitBtn.textContent = 'LOGIN';
     }
@@ -267,7 +293,11 @@ function enterOnlineState(username, myBase32Address) {
   btnLogout.style.display = 'inline-flex';
   
   // Load Destination Address
-  myAddressText.textContent = myBase32Address;
+  if (myBase32Address) {
+    myAddressText.textContent = myBase32Address;
+  } else {
+    myAddressText.textContent = 'Starting I2P tunnels...';
+  }
   addressBanner.style.display = 'flex';
   
   // Start polling loop
@@ -277,8 +307,6 @@ function enterOnlineState(username, myBase32Address) {
 
 function enterOfflineState() {
   isNodeInitialized = false;
-  if (statusIntervalId) clearInterval(statusIntervalId);
-  statusIntervalId = null;
 
   // Reset UI components to offline state
   authCard.style.display = 'block';
@@ -297,7 +325,7 @@ function enterOfflineState() {
   loginSubmit.removeAttribute('disabled');
   loginSubmit.textContent = 'LOGIN';
   
-  addLocalLog('Node de-initialized. Tunnels closed.', 'system');
+  addLocalLog('Node de-initialized. Session closed.', 'system');
 }
 
 btnLogout.addEventListener('click', async () => {
@@ -392,12 +420,14 @@ async function loadReceivedFiles() {
         sizeCell.className = 'font-mono';
         
         const actionCell = document.createElement('td');
-        const downloadLink = document.createElement('a');
-        downloadLink.href = `/api/download?file=${encodeURIComponent(file.name)}`;
-        downloadLink.className = 'btn btn-secondary btn-xs';
-        downloadLink.textContent = 'GET';
-        downloadLink.setAttribute('download', file.name);
-        actionCell.appendChild(downloadLink);
+        const downloadButton = document.createElement('button');
+        downloadButton.type = 'button';
+        downloadButton.className = 'btn btn-secondary btn-xs';
+        downloadButton.textContent = 'GET';
+        downloadButton.addEventListener('click', () => {
+          downloadReceivedFile(file.name);
+        });
+        actionCell.appendChild(downloadButton);
         
         row.appendChild(nameCell);
         row.appendChild(sizeCell);
@@ -413,6 +443,9 @@ async function loadReceivedFiles() {
 btnRefreshFiles.addEventListener('click', loadReceivedFiles);
 
 // Live Logs & Status Polling Loop
+const loadingOverlay = document.getElementById('loading-overlay');
+const loadingStatusText = document.getElementById('loading-status-text');
+
 function startStatusPolling() {
   if (statusIntervalId) clearInterval(statusIntervalId);
   
@@ -422,13 +455,44 @@ function startStatusPolling() {
       const result = await response.json();
       
       if (response.ok && result.status === 'success') {
-        // Append new console logs
+        // 1. Connection Overlay Block management
+        if (result.i2pStatus === 'online') {
+          if (loadingOverlay) {
+            loadingOverlay.style.opacity = '0';
+            setTimeout(() => {
+              loadingOverlay.style.display = 'none';
+            }, 400);
+          }
+          
+          if (isNodeInitialized) {
+            if (result.myBase32Address) {
+              myAddressText.textContent = result.myBase32Address;
+            } else {
+              myAddressText.textContent = 'Starting I2P tunnels...';
+            }
+          }
+        } else {
+          if (loadingOverlay) {
+            loadingOverlay.style.display = 'flex';
+            loadingOverlay.style.opacity = '1';
+            
+            if (result.i2pStatus === 'starting') {
+              loadingStatusText.textContent = 'Launching I2P daemon & SAM bridge...';
+            } else if (result.i2pStatus === 'error') {
+              loadingStatusText.textContent = 'I2P Error: ' + (result.i2pError || 'Unknown error');
+            } else {
+              loadingStatusText.textContent = 'Checking network status...';
+            }
+          }
+        }
+
+        // 2. Append new console logs
         if (result.logs && result.logs.length > 0) {
           result.logs.forEach(log => {
             const line = document.createElement('div');
             // Determine type
             let logType = 'system';
-            if (log.includes('[FOUT]') || log.includes('error') || log.includes('mislukt') || log.includes('failed')) {
+            if (log.includes('[FOUT]') || log.includes('error') || log.includes('mislukt') || log.includes('failed') || log.includes('[PHP FOUT]') || log.includes('[HACK POGING]')) {
               logType = 'error';
             }
             line.className = `log-line ${logType}-line`;
@@ -439,13 +503,13 @@ function startStatusPolling() {
           consoleOutput.scrollTop = consoleOutput.scrollHeight;
         }
 
-        // Render active transfers
-        if (result.activeTransfers) {
+        // 3. Render active transfers
+        if (result.isOnline && result.activeTransfers) {
           renderActiveTransfers(result.activeTransfers);
         }
 
-        // Periodically refresh file list automatically if state is online
-        if (result.hasNewFiles) {
+        // 4. Periodically refresh file list automatically if state is online
+        if (result.isOnline && result.hasNewFiles) {
           loadReceivedFiles();
         }
       }
@@ -486,7 +550,7 @@ async function checkCurrentStatusOnStartup() {
     const response = await fetch('/api/status?offset=0');
     const result = await response.json();
     if (response.ok && result.status === 'success') {
-      if (result.username && result.myBase32Address) {
+      if (result.isOnline && result.username) {
         addLocalLog('Existing node connection detected. Restoring session...', 'system');
         enterOnlineState(result.username, result.myBase32Address);
       }
@@ -496,6 +560,8 @@ async function checkCurrentStatusOnStartup() {
   }
 }
 
+// Start continuous polling and startup checks
+startStatusPolling();
 checkCurrentStatusOnStartup();
 
 function renderActiveTransfers(transfers) {
