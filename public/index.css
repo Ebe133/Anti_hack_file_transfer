@@ -16,7 +16,7 @@
 }
 
 body.dark-mode {
-  --color-bg: #0b0b0b;
+  --color-bg: #2d2929;
   --color-bg-secondary: #141414;
   --color-border: #262626;
   --color-border-light: #1e1e1e;
@@ -24,7 +24,7 @@ body.dark-mode {
   --focus-glow: rgba(238, 238, 238, 0.08);
   --color-text: #eeeeee;
   --color-text-muted: #888888;
-  --color-text-on-dark: #0b0b0b;
+  --color-text-on-dark: hsl(0, 8%, 16%);
   --card-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 
@@ -109,13 +109,15 @@ body {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background-color: #ff3b30; /* Red for offline */
+  background-color: #ff3b30;
+  /* Red for offline */
   border: none;
   transition: background-color 0.3s ease;
 }
 
 .status-indicator.online {
-  background-color: #34c759; /* Green for online */
+  background-color: #34c759;
+  /* Green for online */
 }
 
 .status-text {
@@ -571,7 +573,7 @@ input[type="password"]:focus {
   color: #34c759;
 }
 
-.transfer-status-text.failed, 
+.transfer-status-text.failed,
 .transfer-status-text.declined {
   color: #ff3b30;
 }
@@ -609,4 +611,74 @@ input[type="password"]:focus {
 
 #btn-logout {
   margin-right: 8px;
+}
+
+/* --- LOADING OVERLAY FOR CONNECTION BLOCK --- */
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(11, 11, 11, 0.95);
+  backdrop-filter: blur(8px);
+  z-index: 9999;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  color: #eeeeee;
+  transition: opacity 0.4s ease, visibility 0.4s ease;
+}
+
+body:not(.dark-mode) .loading-overlay {
+  background-color: rgba(255, 255, 255, 0.95);
+  color: #111111;
+}
+
+.loading-content {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: 400px;
+  padding: 30px;
+}
+
+.loading-content h2 {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.loading-content p {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.loading-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border: 1px solid var(--color-border);
+  padding: 6px 12px;
+  border-radius: 4px;
+  background-color: var(--color-bg-secondary);
+  color: var(--color-text);
+}
+
+/* Spinner Animation */
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--color-border-light);
+  border-top-color: var(--color-border-active);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 8px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
