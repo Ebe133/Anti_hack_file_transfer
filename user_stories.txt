@@ -28,8 +28,8 @@ Als gebruiker wil ik inloggen zodat ik een sessietoken krijg en online kom.
 - na inloggen kunnen anderen mijn adres opvragen
 - verkeerd wachtwoord = geen token
 - niet bestaande user = weigeren (en niet verklappen of de naam wel bestaat)
-- inloggen zonder adres = weigeren
-- token in verkeerd formaat moet geweigerd worden
+- adres is optioneel bij login; een meegestuurd adres moet wel een geldig I2P .b32.i2p adres zijn, anders weigeren
+- je vult zelf GEEN token in om in te loggen: de server genereert het session_token en geeft het terug
 
 User Story 03 brute force bescherming (H)
 Als beheerder wil ik dat veel mislukte logins gedetecteerd worden zodat niemand wachtwoorden kan raden.

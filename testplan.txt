@@ -17,11 +17,13 @@ Test Case 01-F  fout    | bestaande naam + lege velden | naam "alice" (bestaat a
 Test Case 01-E  edge    | rare tekens in username | "alice; DROP" , "../etc" , "<script>" , en een naam van 500 tekens
 
 User Story 02 inloggen + token
-Test Case 02-N  normaal | inloggen met goede gegevens | alice / alicepassword / adres 127.0.0.1:9090
-Test Case 02-F  fout    | verkeerd ww / user bestaat niet / geen adres | alice/fout ; nietbestaat/x ; alice zonder adres
-Test Case 02-E  edge    | token in verkeerd formaat gebruiken | token "12345" en een token van 33 tekens
+Test Case 02-N  normaal | inloggen met goede gegevens | alice / alicepassword -> krijgt session_token (32 hex) terug
+Test Case 02-F  fout    | verkeerd ww / user bestaat niet | alice/fout ; nietbestaat/x
+Test Case 02-E  edge    | ongeldig adresformaat bij login | login alice met adres "127.0.0.1:9090" (geen .b32.i2p)
 
-User Story 03 brute force
+
+bruteforce
+
 Test Case 03-N  normaal | teller reset na goede login | 2x fout wachtwoord, dan 1x goed inloggen (alice)
 Test Case 03-F  fout    | 5+ keer fout vanaf zelfde ip | 6x inloggen alice met fout wachtwoord
 Test Case 03-E  edge    | wordt ip echt geblokkeerd? | 10x fout, dan 1x GOED wachtwoord -> wordt die nog geaccepteerd?
