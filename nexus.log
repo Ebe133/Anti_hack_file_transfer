@@ -24,3 +24,23 @@
 [2026-06-19 09:59:00] [Login] Online als 'testtest'. I2P: if54g5zpounalhl2ewljbijr5qqqupikemu2tccd2vji5ah7daqa.b32.i2p
 [2026-06-19 09:59:00] P2P Node is online als 'testtest' op I2P.
 [2026-06-19 09:59:00] I2P Destination: if54g5zpounalhl2ewljbijr5qqqupikemu2tccd2vji5ah7daqa.b32.i2p
+
+============================================================
+[2026-06-22T07:39:06.208Z] NEXUS SHARE gestart
+============================================================
+[2026-06-22 07:39:06] [PHP Server] Starten van server.php op poort 8000...
+[2026-06-22 07:39:06] [PHP FOUT] PHP Warning:  dl(): Dynamically loaded extensions aren't enabled in C:\xampp\htdocs\WeTube\Anti_hack_file_transfer\server.php on line 15
+[2026-06-22 07:39:06] [PHP] Warning: dl(): Dynamically loaded extensions aren't enabled in C:\xampp\htdocs\WeTube\Anti_hack_file_transfer\server.php on line 15
+[2026-06-22 07:39:06] [PHP FOUT] PHP Fatal error:  Uncaught Error: Call to undefined function socket_create() in C:\xampp\htdocs\WeTube\Anti_hack_file_transfer\server.php:30
+[2026-06-22 07:39:06] [PHP FOUT] Stack trace:
+[2026-06-22 07:39:06] [PHP FOUT] #0 {main}
+[2026-06-22 07:39:06] [PHP FOUT] thrown in C:\xampp\htdocs\WeTube\Anti_hack_file_transfer\server.php on line 30
+[2026-06-22 07:39:06] [PHP] Fatal error: Uncaught Error: Call to undefined function socket_create() in C:\xampp\htdocs\WeTube\Anti_hack_file_transfer\server.php:30
+[2026-06-22 07:39:06] [PHP] Stack trace:
+[2026-06-22 07:39:06] [PHP] #0 {main}
+[2026-06-22 07:39:06] [PHP] thrown in C:\xampp\htdocs\WeTube\Anti_hack_file_transfer\server.php on line 30
+[2026-06-22 07:39:06] [PHP Server] server.php beëindigd (code 255).
+[2026-06-22 07:39:11] [PHP Server] FOUT: Auth server reageerde niet na 5s.
+[2026-06-22 07:39:11] [Server] Web UI actief op poort 3000.
+[2026-06-22 07:41:45] [Register] Registreren van 'SleepyFlo'...
+[2026-06-22 07:41:45] [Register] Netwerkfout: connect ECONNREFUSED 127.0.0.1:8000

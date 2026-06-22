@@ -1,0 +1,130 @@
+USER STORIES - Anti-hack file transfer
+
+Dit zijn de user stories die we gebruiken om de testcases op te baseren (zie testplan.txt).
+We hadden ze nog niet opgeschreven dus dat doen we nu alsnog.
+
+Systeem in het kort:
+- web ui + node backend (p2p.js) draait op poort 3000
+- php auth/directory server (server.php) op poort 8000
+- bestanden gaan p2p, versleuteld: RSA envelop voor de sleutel, ChaCha20-Poly1305 per chunk, en SHA-256 als eind check
+- alice = afzender, bob = ontvanger (zo testen we het meestal)
+
+prio = H(oog) / M(idden) / L(aag)
+
+
+accounts en inloggen
+
+User Story 01 account registreren (H)
+Als nieuwe gebruiker wil ik een account aanmaken met username + wachtwoord zodat ik later kan inloggen.
+- registreren met nieuwe naam moet lukken
+- wachtwoord wordt als bcrypt hash opgeslagen in users.json, NIET als platte tekst
+- bestaande naam mag niet nog een keer (foutmelding)
+- lege username of leeg wachtwoord = weigeren
+- rare tekens in username (zoals alice; DROP of ../ of <script>) moeten geweigerd worden en als hackpoging gelogd
+
+User Story 02 inloggen + sessietoken (H)
+Als gebruiker wil ik inloggen zodat ik een sessietoken krijg en online kom.
+- goede gegevens -> success + token van 32 hex tekens
+- na inloggen kunnen anderen mijn adres opvragen
+- verkeerd wachtwoord = geen token
+- niet bestaande user = weigeren (en niet verklappen of de naam wel bestaat)
+- inloggen zonder adres = weigeren
+- token in verkeerd formaat moet geweigerd worden
+
+User Story 03 brute force bescherming (H)
+Als beheerder wil ik dat veel mislukte logins gedetecteerd worden zodat niemand wachtwoorden kan raden.
+- na 5 mislukte pogingen vanaf hetzelfde ip komt er een "brute-force gedetecteerd" melding
+- na een geslaagde login wordt de teller weer op 0 gezet
+- NB: we moeten nog checken of het ip ook echt geblokkeerd wordt of dat het alleen maar gelogd wordt (volgens mij alleen loggen, testen!)
+
+
+directory / lookup
+
+User Story 04 peer opzoeken (H)
+Als ingelogde gebruiker wil ik iemand op naam opzoeken zodat ik diens adres krijg om een bestand te sturen.
+- online user opzoeken met geldig token -> krijg adres terug
+- offline of onbekende user -> "gebruiker is offline"
+- opzoeken zonder geldig token -> weigeren (sessie ongeldig/verlopen)
+
+User Story 05 anonieme server / zero-knowledge (M)
+Als gebruiker wil ik dat de server geen sleutels of bestanden ziet zodat mn data prive blijft ook als de server gehackt wordt.
+- geen wachtwoorden in platte tekst, geen sleutels op de server
+- sessies staan alleen in RAM -> na herstart van de server zijn ze weg
+- de server zit niet in de bestandsoverdracht zelf, alleen lookup/login
+
+
+bestand versturen (p2p)
+
+User Story 06 versleuteld versturen (H)
+Als afzender wil ik een bestand end-to-end versleuteld naar iemand sturen zodat niemand kan meelezen.
+- bestand komt compleet en hetzelfde aan bij de ontvanger
+- de sleutel wordt met de RSA public key van de ontvanger ingepakt
+- elke chunk is versleuteld met ChaCha20-Poly1305 (nonce + tag)
+- afzender zonder geldig token wordt door de ontvanger geweigerd
+
+User Story 07 integriteit checken (H)
+Als ontvanger wil ik dat geknoei met het bestand opgemerkt wordt zodat ik zeker weet dat ik het echte bestand krijg.
+- na ontvangst wordt SHA-256 over het hele bestand vergeleken -> bij gelijk "OK upload"
+- een aangepaste chunk (Poly1305 tag/ciphertext) laat de decryptie falen en stopt de overdracht
+- een kapotte RSA envelop wordt geweigerd ("RSA decodering mislukt")
+
+User Story 08 accepteren of weigeren (M)
+Als ontvanger wil ik een inkomend bestand kunnen accepteren of weigeren zodat ik geen ongewenste bestanden krijg.
+- accepteren -> bestand komt in de map received/
+- weigeren -> verbinding dicht, niks opgeslagen
+- onvolledige metadata (geen username/filename/file_size) -> weigeren
+
+
+input validatie / misbruik
+
+User Story 09 directory traversal bescherming (H)
+Als beheerder wil ik dat bestandsnamen niet buiten de received map kunnen schrijven zodat niemand systeembestanden kan overschrijven.
+- naam met ../ of / of \ (bijv ../../users.json) wordt geweigerd
+- alleen de basename wordt gebruikt
+- geldt ook voor de web download (?file= mag niet uit received/ breken)
+
+User Story 10 max bestandsgrootte (M)
+Als beheerder wil ik een max grootte zodat het systeem niet plat gaat door enorme uploads.
+- bestand onder 500MB mag
+- bestand boven 500MB wordt geweigerd
+- een gelogen file_size in de metadata mag niet zorgen dat er toch meer wordt weggeschreven
+
+User Story 11 injectie / kapotte verzoeken (H)
+Als beheerder wil ik dat de auth server foute/kwaadaardige input afwijst zodat de server stabiel en veilig blijft.
+- geen json of een http probe op poort 8000 -> afwijzen + loggen als hackpoging
+- adres met injectietekens ('"<>;()$) -> weigeren
+- verzoek zonder action of met onbekende action -> nette fout, geen crash
+- regel langer dan 4096 bytes -> niet crashen
+
+User Story 12 toegestane bestandstypen (M)  <-- LET OP, verwachte fout
+Als beheerder wil ik dat verboden bestandstypen (.exe .bat .js) geweigerd worden zodat er geen malware verspreid wordt.
+- .exe / .bat / .sh moet geweigerd worden
+- .txt / .pdf / .png mag wel
+LET OP: in de code zit hier (nog) GEEN controle op. Alleen op grootte en op padveiligheid.
+De opdracht vraagt expliciet om dit te testen ("verboden bestandstype"), dus deze testcase gaat
+waarschijnlijk falen. -> opschrijven als bevinding en beslissen of we het nog fixen (extensie whitelist).
+
+
+web ui / rechten
+
+User Story 13 ontvangen bestanden bekijken + downloaden (M)  <-- nog checken
+Als ingelogde gebruiker wil ik mn ontvangen bestanden zien en downloaden in de browser.
+- /api/files toont de lijst, /api/download?file=... geeft het bestand
+- /api/send vereist dat je ingelogd bent (403 als niet)
+- NOG CHECKEN: vragen /api/files en /api/download ook om een sessie? volgens mij niet ->
+  dan kan een niet ingelogde de bestanden zien/downloaden = mogelijke bevinding
+
+User Story 14 1 sessie tegelijk / netjes uitloggen (L)
+Als gebruiker wil ik kunnen uitloggen en niet dubbel inloggen zodat de status klopt.
+- inloggen terwijl de node al online is -> weigeren (409)
+- na uitloggen kan je opnieuw inloggen
+
+
+dekking vs de opdracht:
+- positieve scenarios: User Story 01,02,04,06,07,08,10,13
+- negatieve scenarios: User Story 01,02,08,10,11,14
+- inloggen zonder account: User Story 02
+- bestand ophalen zonder rechten: User Story 04, User Story 13
+- upload verboden bestandstype: User Story 12
+- ontbrekend bestand / corrupte data: User Story 07, User Story 08
+- verkeerde rechten / injectie / traversal: User Story 05, User Story 09, User Story 11

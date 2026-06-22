@@ -1,0 +1,98 @@
+TESTPLAN - Anti-hack file transfer
+
+Hoort bij user_stories.txt. Per user story doen we 3 testcases:
+  N = normale run (alles goed gebruiken)
+  F = foute run (verkeerde input of geen rechten)
+  E = edge case (grensgeval / raar geval)
+
+opstelling: php server.php op 8000, node p2p.js op 3000, alice = afzender, bob = ontvanger.
+users die er al zijn: alice en bob.
+
+
+accounts/login
+
+User Story 01 account registreren
+Test Case 01-N  normaal | nieuw account aanmaken | nieuwe user "charlie" / wachtwoord "Test1234"
+Test Case 01-F  fout    | bestaande naam + lege velden | naam "alice" (bestaat al); en apart lege naam + leeg wachtwoord
+Test Case 01-E  edge    | rare tekens in username | "alice; DROP" , "../etc" , "<script>" , en een naam van 500 tekens
+
+User Story 02 inloggen + token
+Test Case 02-N  normaal | inloggen met goede gegevens | alice / alicepassword / adres 127.0.0.1:9090
+Test Case 02-F  fout    | verkeerd ww / user bestaat niet / geen adres | alice/fout ; nietbestaat/x ; alice zonder adres
+Test Case 02-E  edge    | token in verkeerd formaat gebruiken | token "12345" en een token van 33 tekens
+
+User Story 03 brute force
+Test Case 03-N  normaal | teller reset na goede login | 2x fout wachtwoord, dan 1x goed inloggen (alice)
+Test Case 03-F  fout    | 5+ keer fout vanaf zelfde ip | 6x inloggen alice met fout wachtwoord
+Test Case 03-E  edge    | wordt ip echt geblokkeerd? | 10x fout, dan 1x GOED wachtwoord -> wordt die nog geaccepteerd?
+
+
+lookup
+
+User Story 04 peer opzoeken
+Test Case 04-N  normaal | online peer opzoeken | geldig token van alice, target "bob" (bob online)
+Test Case 04-F  fout    | opzoeken zonder geldig token | leeg token / verzonnen token, target "bob"
+Test Case 04-E  edge    | offline / onbekende user | geldig token, target "bob" (offline) en target "nietbestaat"
+
+User Story 05 zero-knowledge server
+Test Case 05-N  normaal | sessies alleen in RAM | login alice+bob, kijk in users.json (alleen hashes, geen sessies/sleutels)
+Test Case 05-F  fout    | blijft sessie na herstart? | login, herstart server.php, dan lookup met oud token
+Test Case 05-E  edge    | ziet server sleutels/bestand? | tijdens overdracht kijken of server.php iets van de sleutel/data logt
+
+
+overdracht
+
+User Story 06 versleuteld versturen
+Test Case 06-N  normaal | bestand sturen alice->bob | test.txt (klein tekstbestand)
+Test Case 06-F  fout    | afzender zonder geldig token | versturen met verlopen/verzonnen token
+Test Case 06-E  edge    | leeg bestand sturen | leeg.txt van 0 bytes
+
+User Story 07 integriteit
+Test Case 07-N  normaal | bestand komt identiek aan | bestand met bekende inhoud, hash bron vs ontvangen vergelijken
+Test Case 07-F  fout    | chunk aanpassen | 1 byte in ciphertext/tag wijzigen tijdens versturen
+Test Case 07-E  edge    | RSA envelop kapot maken | envelop vervangen door foute sleuteldata
+
+User Story 08 accept/decline
+Test Case 08-N  normaal | ontvanger accepteert | inkomend test.txt, bob klikt accept
+Test Case 08-F  fout    | ontvanger weigert | inkomend test.txt, bob klikt decline
+Test Case 08-E  edge    | onvolledige metadata | metadata zonder filename of zonder file_size
+
+
+validatie
+
+User Story 09 directory traversal
+Test Case 09-N  normaal | normale naam | rapport.pdf
+Test Case 09-F  fout    | padtekens in naam (p2p) | ../../users.json , ..\..\boot.ini , map/bestand.txt
+Test Case 09-E  edge    | traversal via web download | /api/download?file=../server.php en ?file=..%2F..%2Fusers.json
+
+User Story 10 max grootte
+Test Case 10-N  normaal | bestand onder de limiet | bestand van ~1MB
+Test Case 10-F  fout    | bestand boven 500MB | bestand >500MB (of file_size melding >500MB)
+Test Case 10-E  edge    | gelogen file_size | file_size 10 bytes melden maar veel meer data sturen
+
+User Story 11 injectie / kapotte verzoeken
+Test Case 11-N  normaal | geldig json met bekende actie | {"action":"lookup",...} met geldig token
+Test Case 11-F  fout    | geen json / http probe / onbekende actie | "GET / HTTP/1.1" naar poort 8000 ; {"action":"hack"} ; adres met '"<>;()$
+Test Case 11-E  edge    | te groot verzoek / geen newline | 5000 tekens zonder \n sturen
+
+User Story 12 verboden bestandstypen  (verwacht dat deze faalt!)
+Test Case 12-N  normaal | toegestaan type | foto.png , doc.pdf , tekst.txt
+Test Case 12-F  fout    | verboden type | malware.exe , script.bat , payload.js
+Test Case 12-E  edge    | dubbele/misleidende extensie | factuur.pdf.exe , image.png.bat , bestand zonder extensie
+
+
+web ui
+
+User Story 13 bestanden bekijken/downloaden
+Test Case 13-N  normaal | lijst + download als ingelogde user | ingelogd, /api/files openen en een bestand downloaden
+Test Case 13-F  fout    | /api/send zonder ingelogd | POST /api/send terwijl node offline is
+Test Case 13-E  edge    | /api/files en /api/download zonder sessie | beide endpoints aanroepen zonder ingelogd te zijn
+
+User Story 14 1 sessie / uitloggen
+Test Case 14-N  normaal | uitloggen + opnieuw inloggen | login alice, logout, login alice
+Test Case 14-F  fout    | dubbel inloggen | login alice, daarna nog een keer login zonder logout
+Test Case 14-E  edge    | acties na logout | logout, daarna /api/send of /api/status aanroepen
+
+
+totaal = 42 testcases (14 stories x 3). Dat is ruim boven de minimaal 10 uit de opdracht
+en we zitten op alle gevraagde dingen (positief, negatief, beveiliging).
