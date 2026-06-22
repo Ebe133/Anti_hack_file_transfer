@@ -1,6 +1,6 @@
 <?php
 /**
- * Day 3: PHP Central Auth & Directory Server (server.php) - Zero-Knowledge Edit
+ * Day 3: PHP Central Auth & Directory Server (server.php)
  * 
  * Dit script fungeert als een anonieme lookup- en inlogserver.
  * - Slaat accounts (username -> bcrypt hash) persistent op in users.json.

@@ -118,13 +118,3 @@ User Story 14 1 sessie tegelijk / netjes uitloggen (L)
 Als gebruiker wil ik kunnen uitloggen en niet dubbel inloggen zodat de status klopt.
 - inloggen terwijl de node al online is -> weigeren (409)
 - na uitloggen kan je opnieuw inloggen
-
-
-dekking vs de opdracht:
-- positieve scenarios: User Story 01,02,04,06,07,08,10,13
-- negatieve scenarios: User Story 01,02,08,10,11,14
-- inloggen zonder account: User Story 02
-- bestand ophalen zonder rechten: User Story 04, User Story 13
-- upload verboden bestandstype: User Story 12
-- ontbrekend bestand / corrupte data: User Story 07, User Story 08
-- verkeerde rechten / injectie / traversal: User Story 05, User Story 09, User Story 11
