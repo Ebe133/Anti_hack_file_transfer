@@ -1,0 +1,15 @@
+{
+  "name": "anti-hack-file-transfer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "p2p file transfer",
+  "main": "p2p.js",
+  "scripts": {
+    "start": "node p2p.js",
+    "test": "node test/verify_security.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
