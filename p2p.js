@@ -22,26 +22,223 @@ const http = require('http');
 // Per-start veiligheidstoken, geïnjecteerd in de HTML
 let WEB_SESSION_TOKEN = null;
 
-const UI_PORT = 3000;
+const UI_PORT = process.env.UI_PORT ? parseInt(process.env.UI_PORT, 10) : 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const RECEIVED_DIR = path.join(__dirname, 'received');
-const AUTH_HOST = '127.0.0.1';
-const AUTH_PORT_UI = 8000;
-const LISTEN_PORT = 9090;
+const RECEIVED_DIR = process.env.RECEIVED_DIR ? path.resolve(process.env.RECEIVED_DIR) : path.join(__dirname, 'received');
+const AUTH_SERVER_URL = process.env.AUTH_SERVER_URL || 'https://webgenie-ai.com/server.php';
+
+let parsedAuthUrl = null;
+try {
+  parsedAuthUrl = new URL(AUTH_SERVER_URL);
+} catch {
+  parsedAuthUrl = null;
+}
+
+const AUTH_USE_HTTP = process.env.AUTH_USE_HTTP
+  ? process.env.AUTH_USE_HTTP === '1'
+  : parsedAuthUrl !== null;
+const AUTH_HOST = process.env.AUTH_HOST || (parsedAuthUrl ? parsedAuthUrl.hostname : '127.0.0.1');
+const AUTH_PORT_UI = process.env.AUTH_PORT_UI
+  ? parseInt(process.env.AUTH_PORT_UI, 10)
+  : (parsedAuthUrl ? (parsedAuthUrl.port ? parseInt(parsedAuthUrl.port, 10) : (parsedAuthUrl.protocol === 'https:' ? 443 : 80)) : 8000);
+const AUTH_PATH = process.env.AUTH_PATH || (parsedAuthUrl ? `${parsedAuthUrl.pathname}${parsedAuthUrl.search}` : '/server.php');
+const AUTH_IS_HTTPS = parsedAuthUrl ? parsedAuthUrl.protocol === 'https:' : false;
+const LISTEN_PORT = process.env.LISTEN_PORT ? parseInt(process.env.LISTEN_PORT, 10) : 9090;
 const LOG_MAX = 500;
 
 // Log bestand — alle berichten worden hierheen geschreven
-const LOG_FILE  = path.join(__dirname, 'nexus.log');
+const LOG_FILE  = process.env.LOG_FILE ? path.resolve(process.env.LOG_FILE) : path.join(__dirname, 'nexus.log');
 const logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
 
 // I2P Configuratie
 const I2P_CONFIG = {
-  samHost: '127.0.0.1',
-  samPort: 7656,            // SAM Bridge voor inkomende stream tunnels
-  socksHost: '127.0.0.1',
-  socksPort: 4447           // SOCKS5 proxy voor uitgaande verbindingen
+  samHost: process.env.I2P_SAM_HOST || '127.0.0.1',
+  samPort: process.env.I2P_SAM_PORT ? parseInt(process.env.I2P_SAM_PORT, 10) : 7656,
+  socksHost: process.env.I2P_SOCKS_HOST || '127.0.0.1',
+  socksPort: process.env.I2P_SOCKS_PORT ? parseInt(process.env.I2P_SOCKS_PORT, 10) : 4447
 };
 
+// Globale status voor I2P verbinding
+const i2pState = {
+  status: 'offline', // 'offline', 'starting', 'online', 'error'
+  address: null,
+  samSocket: null,
+  sessionID: null,
+  error: null
+};
+
+/**
+ * Beslist of een verbinding met de central server rechtstreeks of via de SOCKS5 proxy (indien I2P host) verloopt.
+ */
+function connectToAuthServer(authHost, authPort, callback) {
+  if (authHost.endsWith('.i2p')) {
+    webLog(`[Verbinding] Routeren van auth server verzoek naar ${authHost} via SOCKS5 proxy...`);
+    connectSocks5(I2P_CONFIG.socksHost, I2P_CONFIG.socksPort, authHost, 80, callback);
+  } else {
+    const socket = net.connect({ host: authHost, port: parseInt(authPort, 10) }, () => {
+      callback(null, socket);
+    });
+    socket.on('error', err => {
+      callback(err);
+    });
+  }
+}
+
+/**
+ * Verstuurt een auth-verzoek naar de centrale server via HTTP(S) of legacy TCP JSON-lijnprotocol.
+ */
+function sendAuthRequest(payload, callback, authHost = AUTH_HOST, authPort = AUTH_PORT_UI) {
+  if (AUTH_USE_HTTP) {
+    const transport = AUTH_IS_HTTPS ? https : http;
+    const requestData = JSON.stringify(payload);
+
+    const req = transport.request({
+      hostname: AUTH_HOST,
+      port: AUTH_PORT_UI,
+      path: AUTH_PATH,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(requestData),
+        'Accept': 'application/json'
+      }
+    }, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk.toString());
+      res.on('end', () => {
+        const contentType = String(res.headers['content-type'] || '').toLowerCase();
+        const trimmedBody = body.trim();
+
+        // Sommige gratis hosts (o.a. InfinityFree) geven een JS anti-bot challenge
+        // terug i.p.v. JSON voor server-to-server requests.
+        if (contentType.includes('text/html') || trimmedBody.startsWith('<')) {
+          if (trimmedBody.includes('__test=') || trimmedBody.includes('slowAES.decrypt') || trimmedBody.includes('enable Javascript')) {
+            callback(new Error('Auth server wordt afgeschermd door anti-bot HTML challenge (geen JSON API-respons). Gebruik hosting zonder JS challenge voor API-verkeer.'));
+            return;
+          }
+        }
+
+        try {
+          const parsed = JSON.parse(trimmedBody);
+          callback(null, parsed);
+        } catch {
+          const preview = trimmedBody.slice(0, 140).replace(/\s+/g, ' ');
+          callback(new Error(`Ongeldig JSON-antwoord van auth server (HTTP ${res.statusCode || 'n/a'}, content-type: ${contentType || 'onbekend'}, body: ${preview})`));
+        }
+      });
+    });
+
+    req.on('error', (err) => callback(err));
+    req.write(requestData);
+    req.end();
+    return;
+  }
+
+  connectToAuthServer(authHost, authPort, (err, client) => {
+    if (err) {
+      callback(err);
+      return;
+    }
+
+    client.write(JSON.stringify(payload) + '\n');
+
+    let buffer = Buffer.alloc(0);
+    let answered = false;
+
+    client.on('data', data => {
+      if (answered) return;
+      buffer = Buffer.concat([buffer, data]);
+      const nl = buffer.indexOf(10);
+      if (nl === -1) return;
+
+      answered = true;
+      const line = buffer.slice(0, nl).toString().trim();
+      try {
+        callback(null, JSON.parse(line));
+      } catch {
+        callback(new Error('Ongeldige JSON-reactie van server'));
+      }
+      client.destroy();
+    });
+
+    client.on('error', e => {
+      if (answered) return;
+      answered = true;
+      callback(e);
+    });
+  });
+}
+
+/**
+ * Koppel een I2P Base32-adres aan de actieve sessie op de central directory server.
+ */
+function updateAddressOnCentralServer(sessionToken, address, callback) {
+  sendAuthRequest({
+    action: 'update_address',
+    session_token: sessionToken,
+    address: address
+  }, (err, res) => {
+    if (err) {
+      webLog(`[I2P Manager] Netwerkfout bij adres registratie: ${err.message}`);
+      if (callback) callback(err);
+      return;
+    }
+
+    if (res.status === 'success') {
+      webLog(`[I2P Manager] Adres succesvol geregistreerd op directory server: ${address}`);
+      if (callback) callback(null);
+    } else {
+      webLog(`[I2P Manager] Adres registratie mislukt: ${res.message}`);
+      if (callback) callback(new Error(res.message || 'Onbekende auth server fout'));
+    }
+  });
+}
+
+/**
+ * Bootst I2P op in de achtergrond en luistert naar inkomende verbindingen.
+ */
+function bootI2P() {
+  i2pState.status = 'starting';
+  webLog('[I2P Manager] Achtergrond-opstart van I2P gestart...');
+  checkAndInstallI2P((i2pErr) => {
+    if (i2pErr) {
+      i2pState.status = 'error';
+      i2pState.error = i2pErr.message;
+      webLog(`[I2P Manager] I2P startfout: ${i2pErr.message}`);
+      return;
+    }
+    
+    webLog('[I2P Manager] SAM Bridge gedetecteerd. Initialiseren van SAM stream sessie...');
+    createSamSession(LISTEN_PORT, (err, sessionID, base64Destination, samSocket) => {
+      if (err) {
+        i2pState.status = 'error';
+        i2pState.error = err.message;
+        webLog(`[I2P Manager] Initialisatie SAM Bridge mislukt: ${err.message}`);
+        return;
+      }
+      
+      i2pState.status = 'online';
+      i2pState.address = convertI2PBase64toBase32(base64Destination);
+      i2pState.sessionID = sessionID;
+      i2pState.samSocket = samSocket;
+      webLog(`[I2P Manager] I2P is ONLINE. Base32 adres: ${i2pState.address}`);
+      
+      // Start de ontvanger luister-tunnel direct
+      startReceiver(
+        null, null, LISTEN_PORT,
+        AUTH_HOST, AUTH_PORT_UI,
+        i2pState.address, i2pState.sessionID,
+        false, onIncomingTransferUI
+      );
+      
+      // Indien de gebruiker al is ingelogd, registreer direct het adres bij de auth server!
+      if (webState.isOnline && webState.authToken) {
+        webState.myBase32Address = i2pState.address;
+        updateAddressOnCentralServer(webState.authToken, i2pState.address);
+      }
+    });
+  });
+}
 
 // Start direct de Web UI bij opstarten
 if (require.main === module) {
@@ -53,75 +250,43 @@ if (require.main === module) {
  * Logt in bij de PHP server en registreert ons anonieme I2P adres of IP:poort.
  */
 function login(username, password, address, authHost, authPort, callback) {
-  const client = net.connect({ host: authHost, port: parseInt(authPort, 10) }, () => {
-    client.write(JSON.stringify({
-      action: 'login',
-      username: username,
-      password: password,
-      address: address
-    }) + '\n');
-  });
-
-  let buffer = Buffer.alloc(0);
-  client.on('data', data => {
-    buffer = Buffer.concat([buffer, data]);
-    const nl = buffer.indexOf(10);
-    if (nl !== -1) {
-      const line = buffer.slice(0, nl).toString().trim();
-      try {
-        const res = JSON.parse(line);
-        if (res.status === 'success') {
-          callback(null, res.session_token);
-        } else {
-          callback(new Error(res.message));
-        }
-      } catch (e) {
-        callback(new Error('Ongeldige JSON-reactie van server'));
-      }
-      client.destroy();
+  sendAuthRequest({
+    action: 'login',
+    username: username,
+    password: password,
+    address: address
+  }, (err, res) => {
+    if (err) {
+      return callback(new Error('Kan geen verbinding maken met authenticatieserver: ' + err.message));
     }
-  });
 
-  client.on('error', err => {
-    callback(new Error('Kan geen verbinding maken met authenticatieserver: ' + err.message));
-  });
+    if (res.status === 'success') {
+      callback(null, res.session_token);
+    } else {
+      callback(new Error(res.message || 'Ongeldige auth server respons'));
+    }
+  }, authHost, authPort);
 }
 
 /**
  * Zoekt de I2P bestemming of IP-locatie van een online peer op.
  */
 function lookup(sessionToken, targetUsername, authHost, authPort, callback) {
-  const client = net.connect({ host: authHost, port: parseInt(authPort, 10) }, () => {
-    client.write(JSON.stringify({
-      action: 'lookup',
-      session_token: sessionToken,
-      target: targetUsername
-    }) + '\n');
-  });
-
-  let buffer = Buffer.alloc(0);
-  client.on('data', data => {
-    buffer = Buffer.concat([buffer, data]);
-    const nl = buffer.indexOf(10);
-    if (nl !== -1) {
-      const line = buffer.slice(0, nl).toString().trim();
-      try {
-        const res = JSON.parse(line);
-        if (res.status === 'success') {
-          callback(null, res.address);
-        } else {
-          callback(new Error(res.message));
-        }
-      } catch (e) {
-        callback(new Error('Fout bij lookup: ' + line));
-      }
-      client.destroy();
+  sendAuthRequest({
+    action: 'lookup',
+    session_token: sessionToken,
+    target: targetUsername
+  }, (err, res) => {
+    if (err) {
+      return callback(err);
     }
-  });
 
-  client.on('error', err => {
-    callback(err);
-  });
+    if (res.status === 'success') {
+      callback(null, res.address);
+    } else {
+      callback(new Error(res.message || 'Lookup mislukt'));
+    }
+  }, authHost, authPort);
 }
 
 /**
@@ -299,6 +464,13 @@ function startReceiver(myUsername, sessionToken, myPort, authHost, authPort, bas
         return;
       }
 
+      // Beveiliging: Voorkom bufferuitputting / memory exhaustion tijdens streaming (max 256KB in queue)
+      if (buffer.length + dataBlok.length > 256 * 1024) {
+        console.error('[P2P Ontvanger] Streaming buffer limiet (256KB) overschreden. Connectie afgebroken.');
+        socket.destroy();
+        return;
+      }
+
       buffer = Buffer.concat([buffer, dataBlok]);
 
       if (state === 'WAITING_HANDSHAKE') {
@@ -383,7 +555,7 @@ function startReceiver(myUsername, sessionToken, myPort, authHost, authPort, bas
         // Helper: schrijf het bestand en start ontvangst
         function doAccept() {
           console.log('[P2P Ontvanger] Overdracht geaccepteerd. Start download...');
-          const ontvangMap = path.join(__dirname, 'received');
+          const ontvangMap = RECEIVED_DIR;
           fs.mkdirSync(ontvangMap, { recursive: true });
           tempPath = path.join(ontvangMap, veiligeNaam + '.tmp');
 
@@ -739,34 +911,7 @@ function performSendFlow(file, targetUsername, myUsername, sessionToken, authHos
   });
 }
 
-/**
- * Start node in receive modus.
- */
-function initI2PAndLogin(myPort, username, password, authHost, authPort, callback) {
-  checkAndInstallI2P((i2pErr) => {
-    if (i2pErr) {
-      return callback(new Error(`Automatische I2P-opstart of download mislukt: ${i2pErr.message}`));
-    }
 
-    console.log('Maak verbinding met I2P SAM Bridge...');
-    createSamSession(myPort, (err, sessionID, base64Destination, samSocket) => {
-      if (err) {
-        return callback(new Error(`SAM Bridge niet gedetecteerd of verbinding mislukt: ${err.message}`));
-      }
-
-      const myBase32Address = convertI2PBase64toBase32(base64Destination);
-
-      console.log('Inloggen bij directory server...');
-      login(username, password, myBase32Address, authHost, authPort, (loginErr, sessionToken) => {
-        if (loginErr) {
-          samSocket.destroy();
-          return callback(loginErr);
-        }
-        callback(null, { sessionToken, myBase32Address, sessionID, samSocket });
-      });
-    });
-  });
-}
 
 
 let i2pChildProcess = null;
@@ -956,7 +1101,6 @@ module.exports = {
   connectSocks5,
   convertI2PBase64toBase32,
   performSendFlow,
-  initI2PAndLogin,
   startReceiver,
   checkAndInstallI2P,
   I2P_CONFIG
@@ -978,18 +1122,33 @@ const webState = {
   activeTransfers: { sends: {}, receives: {} },
 };
 
-// Sla originele console op vóór enige patching — voorkomt recursie in webLog
+// Patch console globally so that all console.log/error statements are written to stdout, webState.logs, and nexus.log
 const _origConsoleLog = console.log.bind(console);
 const _origConsoleErr = console.error.bind(console);
 
-function webLog(msg) {
-
-  const ts   = new Date().toISOString().replace('T', ' ').slice(0, 19);
+console.log = (...args) => {
+  const msg = args.join(' ');
+  _origConsoleLog(msg);
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
   const line = `[${ts}] ${msg}`;
-  _origConsoleLog(line);              // altijd origineel gebruiken
-  logStream.write(line + '\n');      // schrijf naar nexus.log
+  logStream.write(line + '\n');
   webState.logs.push(line);
   if (webState.logs.length > LOG_MAX) webState.logs.shift();
+};
+
+console.error = (...args) => {
+  const msg = args.join(' ');
+  _origConsoleErr(msg);
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const line = `[${ts}] [FOUT] ${msg}`;
+  logStream.write(line + '\n');
+  webState.logs.push(line);
+  if (webState.logs.length > LOG_MAX) webState.logs.shift();
+};
+
+// Backwards compatibility for webLog
+function webLog(msg) {
+  console.log(msg);
 }
 
 function sendJSON(res, code, obj) {
@@ -1040,21 +1199,15 @@ function serveIndex(res) {
   });
 }
 
-// Patch console.log/error tijdelijk naar webLog en herstel nadien
-function withWebLog(fn, callback) {
-  const origLog = console.log;
-  const origErr = console.error;
-  console.log = (...args) => webLog(args.join(' '));
-  console.error = (...args) => webLog('[FOUT] ' + args.join(' '));
-  fn(() => {
-    console.log = origLog;
-    console.error = origErr;
-    if (callback) callback();
-  });
-}
+
 
 // ── Inkomende transfer UI callback ───────────────────────────────────────────
 function onIncomingTransferUI(info, acceptFn, declineFn) {
+  if (!webState.isOnline) {
+    webLog(`[Ontvanger] Inkomende transfer geweigerd: node is offline/uitgelogd.`);
+    declineFn();
+    return;
+  }
   const id = crypto.randomBytes(4).toString('hex');
   webLog(`[Ontvanger] Inkomend: '${info.filename}' van '${info.username}' (${(info.file_size / 1048576).toFixed(2)} MB) — wacht op UI-beslissing...`);
   webState.activeTransfers.receives[id] = {
@@ -1081,36 +1234,20 @@ async function handleWebRegister(req, res) {
 
   webLog(`[Register] Registreren van '${username}'...`);
 
-  const client = net.connect({ host: AUTH_HOST, port: AUTH_PORT_UI }, () => {
-    client.write(JSON.stringify({ action: 'register', username, password }) + '\n');
-  });
-
-  let answered = false;
-  client.on('data', data => {
-    if (answered) return; answered = true;
-    try {
-      const r = JSON.parse(data.toString().trim());
-      if (r.status === 'success') {
-        webLog(`[Register] Succes: '${username}' aangemaakt.`);
-        sendJSON(res, 200, { status: 'success', message: r.message });
-      } else {
-        webLog(`[Register] Mislukt: ${r.message}`);
-        sendJSON(res, 400, { status: 'error', message: r.message });
-      }
-    } catch { sendJSON(res, 500, { status: 'error', message: 'Ongeldig antwoord van auth server.' }); }
-    client.destroy();
-  });
-  client.on('error', err => {
-    if (answered) return; answered = true;
-    webLog(`[Register] Netwerkfout: ${err.message}`);
-    sendJSON(res, 503, { status: 'error', message: `Kan niet verbinden met auth server: ${err.message}` });
-  });
-  setTimeout(() => {
-    if (!answered) {
-      answered = true; client.destroy();
-      sendJSON(res, 504, { status: 'error', message: 'Auth server timeout.' });
+  sendAuthRequest({ action: 'register', username, password }, (err, r) => {
+    if (err) {
+      webLog(`[Register] Netwerkfout: ${err.message}`);
+      return sendJSON(res, 503, { status: 'error', message: `Kan niet verbinden met auth server: ${err.message}` });
     }
-  }, 10000);
+
+    if (r.status === 'success') {
+      webLog(`[Register] Succes: '${username}' aangemaakt.`);
+      sendJSON(res, 200, { status: 'success', message: r.message });
+    } else {
+      webLog(`[Register] Mislukt: ${r.message}`);
+      sendJSON(res, 400, { status: 'error', message: r.message || 'Registratie mislukt' });
+    }
+  });
 }
 
 async function handleWebLogin(req, res) {
@@ -1125,17 +1262,9 @@ async function handleWebLogin(req, res) {
   if (!username || !password)
     return sendJSON(res, 400, { status: 'error', message: 'Gebruikersnaam en wachtwoord verplicht.' });
 
-  webLog(`[Login] I2P opstarten en inloggen als '${username}'...`);
+  webLog(`[Login] Inloggen als '${username}'...`);
 
-  const origLog = console.log;
-  const origErr = console.error;
-  console.log = (...a) => webLog(a.join(' '));
-  console.error = (...a) => webLog('[FOUT] ' + a.join(' '));
-
-  initI2PAndLogin(LISTEN_PORT, username, password, AUTH_HOST, AUTH_PORT_UI, (err, info) => {
-    console.log = origLog;
-    console.error = origErr;
-
+  login(username, password, i2pState.address || '', AUTH_HOST, AUTH_PORT_UI, (err, sessionToken) => {
     if (err) {
       webLog(`[Login] Mislukt: ${err.message}`);
       return sendJSON(res, 503, { status: 'error', message: err.message });
@@ -1143,29 +1272,20 @@ async function handleWebLogin(req, res) {
 
     webState.isOnline = true;
     webState.username = username;
-    webState.myBase32Address = info.myBase32Address;
-    webState.authToken = info.sessionToken;
-    webState.samSocket = info.samSocket;
+    webState.authToken = sessionToken;
+    webState.myBase32Address = i2pState.address || null;
 
-    webLog(`[Login] Online als '${username}'. I2P: ${info.myBase32Address}`);
+    webLog(`[Login] Online als '${username}'.`);
 
-    const origLog2 = console.log;
-    const origErr2 = console.error;
-    console.log = (...a) => webLog(a.join(' '));
-    console.error = (...a) => webLog('[FOUT] ' + a.join(' '));
-
-    startReceiver(
-      username, info.sessionToken, LISTEN_PORT,
-      AUTH_HOST, AUTH_PORT_UI,
-      info.myBase32Address, info.sessionID,
-      false, onIncomingTransferUI
-    );
-
-    console.log = origLog2;
-    console.error = origErr2;
+    // Koppel het I2P-adres als het al online is
+    if (i2pState.status === 'online') {
+      updateAddressOnCentralServer(sessionToken, i2pState.address);
+    } else {
+      webLog(`[Login] I2P tunnel is nog aan het opstarten op de achtergrond...`);
+    }
 
     fs.mkdirSync(RECEIVED_DIR, { recursive: true });
-    sendJSON(res, 200, { status: 'success', myBase32Address: info.myBase32Address });
+    sendJSON(res, 200, { status: 'success', myBase32Address: webState.myBase32Address });
   });
 }
 
@@ -1205,14 +1325,7 @@ async function handleWebSend(req, res) {
 
   webLog(`[Verzender] Start: '${safeFilename}' → '${recipient}'...`);
 
-  const origLog = console.log;
-  const origErr = console.error;
-  console.log = (...a) => webLog(a.join(' '));
-  console.error = (...a) => webLog('[FOUT] ' + a.join(' '));
-
   performSendFlow(tmpFile, recipient, webState.username, webState.authToken, AUTH_HOST, AUTH_PORT_UI, (err) => {
-    console.log = origLog;
-    console.error = origErr;
     try { fs.unlinkSync(tmpFile); } catch { }
     const t = webState.activeTransfers.sends[tid];
     if (t) {
@@ -1220,8 +1333,8 @@ async function handleWebSend(req, res) {
       if (!err) { t.sent = fileBuffer.length; }
       setTimeout(() => delete webState.activeTransfers.sends[tid], 10000);
     }
-    if (err) webLog(`[Verzender] Mislukt: ${err}`);
-    else webLog(`[Verzender] '${safeFilename}' succesvol verzonden naar '${recipient}'.`);
+    if (err) console.error(`[Verzender] Mislukt: ${err}`);
+    else console.log(`[Verzender] '${safeFilename}' succesvol verzonden naar '${recipient}'.`);
   });
 
   sendJSON(res, 200, { status: 'success', message: `Verzending gestart voor '${safeFilename}'.` });
@@ -1239,13 +1352,7 @@ async function handleWebAccept(req, res) {
   webLog(`[Ontvanger] Geaccepteerd: '${t.filename}' van '${t.sender}'.`);
   t.status = 'receiving';
 
-  const origLog = console.log;
-  const origErr = console.error;
-  console.log = (...a) => webLog(a.join(' '));
-  console.error = (...a) => webLog('[FOUT] ' + a.join(' '));
   t.acceptFn();
-  console.log = origLog;
-  console.error = origErr;
 
   setTimeout(() => {
     const tr = webState.activeTransfers.receives[body.transferId];
@@ -1278,7 +1385,6 @@ async function handleWebLogout(req, res) {
     return sendJSON(res, 400, { status: 'error', message: 'Node is al offline.' });
 
   webLog('[Logout] Node sessie beëindigd door gebruiker.');
-  if (webState.samSocket) { try { webState.samSocket.destroy(); } catch { } webState.samSocket = null; }
   webState.isOnline = false; webState.username = null;
   webState.myBase32Address = null; webState.authToken = null;
   webState.activeTransfers = { sends: {}, receives: {} };
@@ -1302,7 +1408,9 @@ function handleWebStatus(req, res) {
     status: 'success',
     isOnline: webState.isOnline,
     username: webState.username,
-    myBase32Address: webState.myBase32Address,
+    myBase32Address: webState.myBase32Address || i2pState.address,
+    i2pStatus: i2pState.status,
+    i2pError: i2pState.error,
     logs: newLogs,
     activeTransfers: { sends: webState.activeTransfers.sends, receives: cleanReceives },
     hasNewFiles: hadNewFiles,
@@ -1345,12 +1453,18 @@ function handleWebDownload(req, res) {
 function handleWebShutdown(req, res) {
   webLog('[Shutdown] Terminatie ontvangen. Server stopt...');
   sendJSON(res, 200, { status: 'success', message: 'Server wordt afgesloten.' });
-  if (webState.samSocket) { try { webState.samSocket.destroy(); } catch { } }
+  if (i2pState.samSocket) { try { i2pState.samSocket.destroy(); } catch { } }
   setTimeout(() => process.exit(0), 500);
 }
 
 // ── PHP Auth Server starten ────────────────────────────────────────────
 function startPhpServer(callback) {
+  if (AUTH_USE_HTTP) {
+    webLog(`[PHP Server] Externe auth server geconfigureerd (${AUTH_SERVER_URL}); lokale server.php wordt overgeslagen.`);
+    callback();
+    return;
+  }
+
   // Check of poort 8000 al in gebruik is (server draait al)
   const testSocket = net.connect({ host: '127.0.0.1', port: AUTH_PORT_UI }, () => {
     testSocket.destroy();
@@ -1422,8 +1536,11 @@ function startWebUI() {
   logStream.write(`[${new Date().toISOString()}] NEXUS SHARE gestart\n`);
   logStream.write('='.repeat(60) + '\n');
 
-  // Eerst PHP auth server starten, dan pas de web UI
+  // Eerst PHP auth server starten, dan pas de web UI en I2P booten
   startPhpServer(() => {
+    // Start I2P op de achtergrond
+    bootI2P();
+
     const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', `http://localhost:${UI_PORT}`);
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Session-Token');
