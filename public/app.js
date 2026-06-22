@@ -373,7 +373,7 @@ transferForm.addEventListener('submit', async (e) => {
       
       const result = await response.json();
       if (response.ok && result.status === 'success') {
-        addLocalLog(`Payload '${selectedFile.name}' successfully routed and accepted by '${recipient}'.`, 'system');
+        addLocalLog(`Payload '${selectedFile.name}' queued. Streaming to '${recipient}' gestart.`, 'system');
         clearSelectedFile();
       } else {
         addLocalLog(`Transmission failed: ${result.message || 'Unknown error'}`, 'error');
