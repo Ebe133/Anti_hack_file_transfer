@@ -706,14 +706,23 @@ function startReceiver(myUsername, sessionToken, myPort, authHost, authPort, bas
 
               if (calculatedSha256 !== expectedSha256) {
                 console.error('[P2P Ontvanger] SHA-256 integriteitscontrole mislukt!');
-                socket.write('FOUT: SHA-256 hash mismatch.\n');
-                socket.destroy();
+                socket.end('FOUT: SHA-256 hash mismatch.\n');
                 cleanup();
               } else {
                 fs.renameSync(tempPath, finalPath);
                 console.log(`[P2P Ontvanger] Bestand succesvol opgeslagen: ${fileInfo.filename}`);
-                socket.write(`OK geupload: ${fileInfo.filename}\n`);
-                socket.destroy();
+                webState.hasNewFiles = true;
+
+                for (const [tid, tr] of Object.entries(webState.activeTransfers.receives || {})) {
+                  if (tr.filename === fileInfo.filename && tr.sender === fileInfo.username) {
+                    tr.status = 'complete';
+                    tr.received = fileInfo.file_size;
+                    setTimeout(() => delete webState.activeTransfers.receives[tid], 10000);
+                    break;
+                  }
+                }
+
+                socket.end(`OK geupload: ${fileInfo.filename}\n`);
                 if (isMulti) {
                   process.stdout.write('\n> ');
                 }
@@ -800,9 +809,16 @@ function startReceiver(myUsername, sessionToken, myPort, authHost, authPort, bas
  * Maakt verbinding met een peer en verzendt een bestand.
  */
 function performSendFlow(file, targetUsername, myUsername, sessionToken, authHost, authPort, callback) {
+  let finalized = false;
+  const finalize = (err = null) => {
+    if (finalized) return;
+    finalized = true;
+    if (callback) callback(err);
+  };
+
   if (!fs.existsSync(file)) {
     console.error(`Fout: Bestand '${file}' bestaat niet.`);
-    if (callback) callback();
+    finalize(new Error('Bestand bestaat niet'));
     return;
   }
   const fileData = fs.readFileSync(file);
@@ -812,7 +828,7 @@ function performSendFlow(file, targetUsername, myUsername, sessionToken, authHos
   lookup(sessionToken, targetUsername, authHost, authPort, (err, targetAddress) => {
     if (err) {
       console.error(`[P2P Verzender] Lookup mislukt:`, err.message);
-      if (callback) callback();
+      finalize(err);
       return;
     }
 
@@ -824,13 +840,31 @@ function performSendFlow(file, targetUsername, myUsername, sessionToken, authHos
       peerSocket.on('timeout', () => {
         console.error('[P2P Verzender] Verbinding gesloten wegens time-out.');
         peerSocket.destroy();
-        if (callback) callback();
+        finalize(new Error('Verbinding time-out'));
+      });
+
+      peerSocket.on('error', (socketErr) => {
+        console.error('[P2P Verzender] Socketfout:', socketErr.message);
+        finalize(socketErr);
       });
 
       let peerBuffer = Buffer.alloc(0);
       let peerPublicKey = null;
       let state = 'WAITING_RSA';
       let sessionKey = null;
+      let gotFinalAck = false;
+      let sentAllChunks = false;
+      let gotFailureReply = false;
+
+      peerSocket.on('close', () => {
+        if (state === 'STREAMING' && (gotFinalAck || (sentAllChunks && !gotFailureReply))) {
+          finalize(null);
+          return;
+        }
+        if (!finalized) {
+          finalize(new Error('Verbinding met peer voortijdig gesloten'));
+        }
+      });
 
       peerSocket.on('data', dataBlok => {
         peerBuffer = Buffer.concat([peerBuffer, dataBlok]);
@@ -920,19 +954,25 @@ function performSendFlow(file, targetUsername, myUsername, sessionToken, authHos
               peerSocket.write(Buffer.concat([chunkNonce, chunkCiphertext, chunkTag]));
               offset += chunk.length;
             }
+            sentAllChunks = true;
             peerSocket.end();
           } else {
             console.error('[P2P Verzender] Overdracht geweigerd:', line);
             peerSocket.destroy();
-            if (callback) callback();
+            finalize(new Error(`Overdracht geweigerd: ${line}`));
           }
         } else if (state === 'STREAMING') {
           const nl = peerBuffer.indexOf(10);
           if (nl === -1) return;
           const line = peerBuffer.slice(0, nl).toString().trim();
           console.log('[P2P Verzender] Peer antwoord:', line);
+          if (line.startsWith('OK')) {
+            gotFinalAck = true;
+          } else if (line.startsWith('FOUT')) {
+            gotFailureReply = true;
+            finalize(new Error(line));
+          }
           peerSocket.destroy();
-          if (callback) callback();
         }
       });
     };
@@ -941,7 +981,7 @@ function performSendFlow(file, targetUsername, myUsername, sessionToken, authHos
     connectSocks5(I2P_CONFIG.socksHost, I2P_CONFIG.socksPort, targetAddress, 80, (socksErr, peerSocket) => {
       if (socksErr) {
         console.error('[P2P Verzender] Kan niet verbinden via SOCKS5:', socksErr.message);
-        if (callback) callback();
+        finalize(socksErr);
         return;
       }
       verbindingKlaar(peerSocket);
@@ -1391,14 +1431,6 @@ async function handleWebAccept(req, res) {
   t.status = 'receiving';
 
   t.acceptFn();
-
-  setTimeout(() => {
-    const tr = webState.activeTransfers.receives[body.transferId];
-    if (tr) {
-      tr.status = 'complete'; webState.hasNewFiles = true;
-      setTimeout(() => delete webState.activeTransfers.receives[body.transferId], 10000);
-    }
-  }, 2000);
 
   sendJSON(res, 200, { status: 'success', message: 'Transfer geaccepteerd.' });
 }
