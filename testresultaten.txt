@@ -1,0 +1,123 @@
+TESTRESULTATEN - Anti-hack file transfer
+
+Hoort bij testplan.txt. Per testcase noteren we: resultaat (OK / FAIL / N.v.t.),
+wat er gebeurde, en eventueel een opmerking.
+
+opstelling: php server.php op 8000, node p2p.js op 3000, alice = afzender, bob = ontvanger.
+uitgevoerd door: ______________
+datum: ______________
+
+legenda:
+  OK      = gedroeg zich zoals verwacht in het testplan
+  FAIL = week af van verwachting / bug gevonden
+  N.v.t   = nog niet getest
+
+
+accounts/login
+
+User Story 01 account registreren
+Test Case 01-N  [   ]  resultaat: Succes
+Test Case 01-F  [   ]  resultaat: Bestaande naam faalt met error, lege velden geven error met uitleg.
+Test Case 01-E  [   ]  resultaat: Ongeldige tekens geeft error, te lange naam geeft error (naam moet tussen 3 en 32 tekens bevatten)
+
+User Story 02 inloggen + token
+Test Case 02-N  [   ]  resultaat: Login werkt
+Test Case 02-F  [   ]  resultaat: Elke case geeft ongeldige gegevens
+Test Case 02-E  [   ]  resultaat: geweigerd.
+
+User Story 03 brute force
+Test Case 03-N  [   ]  resultaat: Goede login lukt na 2x fout wachtwoord, krijgt gewoon token (32 hex) terug. Werkt, maar er is geen teller die gereset wordt.
+Test Case 03-F  [   ]  resultaat: FAIL - geen blokkade. 6x fout vanaf zelfde ip geeft elke keer "Ongeldige inloggegevens", er is geen rate limiting / ip-block.
+Test Case 03-E  [   ]  resultaat: FAIL - ip wordt niet geblokkeerd. Na 10x fout wordt het goede wachtwoord nog gewoon geaccepteerd (token teruggegeven).
+
+
+lookup
+
+User Story 04 peer opzoeken
+Test Case 04-N  [   ]  resultaat: Lookup van online bob met geldig token geeft het juiste .b32.i2p adres terug.
+Test Case 04-F  [   ]  resultaat: Leeg en verzonnen token geven beide "Sessie is ongeldig of verlopen", geen adres.
+Test Case 04-E  [   ]  resultaat: Offline bob (geen adres) en onbekende user geven "Gebruiker is offline of I2P is nog niet gereed".
+
+User Story 05 zero-knowledge server  (users staan op de online server: webgenie-ai.com/server.php)
+Test Case 05-N  [   ]  resultaat: De online server slaat alleen bcrypt-wachtwoordhashes op ($2y$...), geen sessies, tokens of sleutels in de gebruikersopslag.
+Test Case 05-F  [   ]  resultaat: Let op: in de gehoste web-modus blijven sessies server-side bewaard (sessions.json, 24u-vervaltijd), dus een herstart alleen verwijdert het token niet (code-review). In de lokale CLI-socketmodus staan sessies alleen in RAM en is het token na herstart wel weg.
+Test Case 05-E  [   ]  resultaat: server.php doet alleen auth/directory; de overdracht is p2p, de server ziet of logt geen sleutels of bestandsdata (code-review).
+
+
+overdracht
+
+User Story 06 versleuteld versturen
+Test Case 06-N  [   ]  resultaat: N.v.t - vereist volledige live I2P-opstelling (twee nodes). Mechanisme aanwezig: RSA-envelop + ChaCha20-Poly1305 streaming.
+Test Case 06-F  [   ]  resultaat: N.v.t - vereist live overdracht. In code wordt verlopen/verzonnen token bij lookup al geweigerd voordat verzonden wordt.
+Test Case 06-E  [   ]  resultaat: N.v.t - vereist live overdracht (leeg bestand van 0 bytes).
+
+User Story 07 integriteit
+Test Case 07-N  [   ]  resultaat: N.v.t - vereist live overdracht. In code: SHA-256 van ontvangen bestand wordt vergeleken met hash uit RSA-envelop (p2p.js:705-711).
+Test Case 07-F  [   ]  resultaat: N.v.t - vereist live overdracht. In code: gewijzigde chunk faalt op Poly1305 MAC -> "Integriteitsfout" (p2p.js:693-699).
+Test Case 07-E  [   ]  resultaat: N.v.t - vereist live overdracht. In code: kapotte RSA-envelop faalt bij privateDecrypt -> "envelop corrupt" (p2p.js:662-666).
+
+User Story 08 accept/decline
+Test Case 08-N  [   ]  resultaat: N.v.t - vereist live overdracht + UI (bob klikt accept).
+Test Case 08-F  [   ]  resultaat: N.v.t - vereist live overdracht + UI (bob klikt decline).
+Test Case 08-E  [   ]  resultaat: N.v.t - vereist live overdracht. In code: metadata zonder filename/file_size geeft "Incomplete metadata" (p2p.js:568-571).
+
+
+validatie
+
+User Story 09 directory traversal  (validatie-guards getest via losse logica-check)
+Test Case 09-N  [   ]  resultaat: Normale naam "rapport.pdf" wordt toegestaan.
+Test Case 09-F  [   ]  resultaat: "../../users.json", "..\..\boot.ini" en "map/bestand.txt" worden allemaal geblokkeerd (basename + pad-check).
+Test Case 09-E  [   ]  resultaat: Web download "../server.php" en "..%2F..%2Fusers.json" (gedecodeerd naar ../../) worden geblokkeerd.
+
+User Story 10 max grootte  (declared-size guard getest via losse logica-check)
+Test Case 10-N  [   ]  resultaat: Bestand van ~1MB zit onder de 500MB-limiet en wordt toegestaan.
+Test Case 10-F  [   ]  resultaat: file_size > 500MB wordt geweigerd ("Bestand te groot (max 500MB)").
+Test Case 10-E  [   ]  resultaat: Gelogen file_size passeert de size-guard, maar wordt bij afronding gepakt door SHA-256 mismatch -> bestand geweigerd (code-review).
+
+User Story 11 injectie / kapotte verzoeken
+Test Case 11-N  [   ]  resultaat: Geldig JSON met geldig token wordt correct verwerkt (lookup uitgevoerd, adres teruggegeven).
+Test Case 11-F  [   ]  resultaat: HTTP-probe "GET / HTTP/1.1" -> "Ongeldig JSON-formaat"; {"action":"hack"} -> "Onbekende actie"; adres met '"<>;()$ -> "Ongeldig adresformaat".
+Test Case 11-E  [   ]  resultaat: 5000 tekens zonder newline: server leest max 4096 bytes, sluit de verbinding zonder antwoord en blijft online (geen crash/buffer-uitputting).
+
+User Story 12 verboden bestandstypen  (verwacht dat deze faalt!)
+Test Case 12-N  [   ]  resultaat: Toegestane types (foto.png, doc.pdf, tekst.txt) worden geaccepteerd.
+Test Case 12-F  [   ]  resultaat: FAIL (zoals verwacht) - malware.exe, script.bat en payload.js worden NIET geblokkeerd; er is geen extensie-/type-filter.
+Test Case 12-E  [   ]  resultaat: FAIL (zoals verwacht) - factuur.pdf.exe, image.png.bat en bestanden zonder extensie worden ook gewoon geaccepteerd.
+
+
+web ui
+
+User Story 13 bestanden bekijken/downloaden
+Test Case 13-N  [   ]  resultaat: N.v.t - vereist draaiende node + browser (web UI online).
+Test Case 13-F  [   ]  resultaat: N.v.t - vereist web UI. In code: /api/send met node offline geeft 403 "Node is niet actief".
+Test Case 13-E  [   ]  resultaat: N.v.t - vereist web UI. In code: /api/files en /api/download zonder sessie geven 403 (handleWebDownload p2p.js:1479).
+
+User Story 14 1 sessie / uitloggen
+Test Case 14-N  [   ]  resultaat: N.v.t - vereist web UI (login, logout, opnieuw login).
+Test Case 14-F  [   ]  resultaat: N.v.t - vereist web UI (dubbel inloggen).
+Test Case 14-E  [   ]  resultaat: N.v.t - vereist web UI (acties na logout).
+
+
+samenvatting
+  totaal testcases : 42
+  OK               : 23
+  FAIL          : 4   (03-F, 03-E, 12-F, 12-E)
+  nog te doen      : 15  (US06, US07, US08, US13, US14 - vereisen live I2P + browser)
+
+opmerkingen / gevonden bugs:
+  - Geen brute-force bescherming: login telt mislukte pogingen niet en blokkeert ip's niet.
+    Na 10x fout wordt een goed wachtwoord nog gewoon geaccepteerd (03-F, 03-E).
+  - Geen bestandstype-/extensiefilter: .exe, .bat, .js en misleidende dubbele extensies
+    (factuur.pdf.exe) worden geaccepteerd (12-F, 12-E). In testplan al verwacht als faler.
+  - Sessies zijn in de gehoste web-modus niet puur in RAM: ze blijven server-side bewaard
+    in sessions.json (24u). Aandachtspunt bij de zero-knowledge-eis (05-F).
+
+methode / scope:
+  - Auth/directory laag (US01, US02, US03, US04, US05, US11) live getest tegen server.php
+    (lokale CLI-socketmodus). Dit is dezelfde verwerkActie()-code als de online server
+    (webgenie-ai.com/server.php); er is bewust GEEN aanval-/testverkeer naar de live
+    productieserver gestuurd.
+  - Validatie-guards (US09, US10, US12) getest via een losse logica-check in Node op de
+    exacte guards uit p2p.js (zonder volledige I2P-overdracht).
+  - US06-08 (overdracht) en US13-14 (web UI) vereisen de volledige live I2P- + browser-
+    opstelling en zijn deze ronde niet uitgevoerd; het mechanisme is wel in code geverifieerd.

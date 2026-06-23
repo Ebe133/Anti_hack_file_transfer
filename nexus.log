@@ -117,3 +117,207 @@
 [2026-06-22 08:35:35] I2P Destination: 4imjmzdre45yul53sewf66xers4yrvpkslmretodkrbdw2eke6hq.b32.i2p
 [2026-06-22 08:35:54] [Shutdown] Terminatie ontvangen. Server stopt...
 [2026-06-22 08:35:55] [I2P Manager] Stoppen van lokale i2pd daemon...
+
+============================================================
+[2026-06-22T08:36:54.330Z] NEXUS SHARE gestart
+============================================================
+[2026-06-22 08:36:54] 
+[2026-06-22 08:36:54] ╔══════════════════════════════════════════════════╗
+[2026-06-22 08:36:54] ║         NEXUS SHARE — Web UI (p2p.js)            ║
+[2026-06-22 08:36:54] ╠══════════════════════════════════════════════════╣
+[2026-06-22 08:36:54] ║  URL:  http://localhost:3000                      ║
+[2026-06-22 08:36:54] ║  Log:  nexus.log                                  ║
+[2026-06-22 08:36:54] ╚══════════════════════════════════════════════════╝
+[2026-06-22 08:36:54] 
+[2026-06-22 08:36:54] Browser opent automatisch. Druk CTRL+C om te stoppen.
+[2026-06-22 08:36:54] [Server] Web UI actief op poort 3000.
+[2026-06-22 08:36:54] [I2P Manager] SAM Bridge offline, maar lokale i2pd.exe gevonden. Starten...
+[2026-06-22 08:36:54] [I2P Manager] i2pd daemon gestart in achtergrond. Wachten tot SAM Bridge online komt...
+[2026-06-22 08:36:59] [I2P Manager] Wachten tot SAM Bridge online komt... (poging 5/120)
+[2026-06-22 08:37:00] [I2P Manager] SAM Bridge is online gekomen en luistert!
+[2026-06-22 08:37:00] [I2P Manager] SAM Bridge gedetecteerd. Initialiseren van SAM stream sessie...
+[2026-06-22 08:37:15] [I2P Manager] I2P is ONLINE. Base32 adres: npnkjyevysro462orjkt2vmdm2bw7u4ei72kltjmdnerb3lnkq7q.b32.i2p
+[2026-06-22 08:37:15] P2P Node is online als 'null' op I2P.
+[2026-06-22 08:37:15] I2P Destination: npnkjyevysro462orjkt2vmdm2bw7u4ei72kltjmdnerb3lnkq7q.b32.i2p
+[2026-06-22 08:37:27] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 08:37:27] [Auth] DNS lookup mislukt voor webgenie-ai.com. Herprobeer via www.webgenie-ai.com...
+[2026-06-22 08:37:27] [Login] Mislukt: Kan geen verbinding maken met authenticatieserver: getaddrinfo ENOTFOUND www.webgenie-ai.com
+[2026-06-22 08:38:55] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 08:38:55] [Login] Mislukt: Ongeldige inloggegevens
+[2026-06-22 08:39:08] [Register] Registreren van 'SleepyFlo'...
+[2026-06-22 08:39:09] [Register] Succes: 'SleepyFlo' aangemaakt.
+[2026-06-22 08:39:12] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 08:39:12] [Login] Online als 'SleepyFlo'.
+[2026-06-22 08:39:12] [I2P Manager] Adres succesvol geregistreerd op directory server: npnkjyevysro462orjkt2vmdm2bw7u4ei72kltjmdnerb3lnkq7q.b32.i2p
+[2026-06-22 08:40:09] [Shutdown] Terminatie ontvangen. Server stopt...
+[2026-06-22 08:40:09] [I2P Manager] Stoppen van lokale i2pd daemon...
+
+============================================================
+[2026-06-22T08:40:16.323Z] NEXUS SHARE gestart
+============================================================
+[2026-06-22 08:40:16] 
+[2026-06-22 08:40:16] ╔══════════════════════════════════════════════════╗
+[2026-06-22 08:40:16] ║         NEXUS SHARE — Web UI (p2p.js)            ║
+[2026-06-22 08:40:16] ╠══════════════════════════════════════════════════╣
+[2026-06-22 08:40:16] ║  URL:  http://localhost:3000                      ║
+[2026-06-22 08:40:16] ║  Log:  nexus.log                                  ║
+[2026-06-22 08:40:16] ╚══════════════════════════════════════════════════╝
+[2026-06-22 08:40:16] 
+[2026-06-22 08:40:16] Browser opent automatisch. Druk CTRL+C om te stoppen.
+[2026-06-22 08:40:16] [Server] Web UI actief op poort 3000.
+[2026-06-22 08:40:16] [I2P Manager] SAM Bridge offline, maar lokale i2pd.exe gevonden. Starten...
+[2026-06-22 08:40:16] [I2P Manager] i2pd daemon gestart in achtergrond. Wachten tot SAM Bridge online komt...
+[2026-06-22 08:40:21] [I2P Manager] Wachten tot SAM Bridge online komt... (poging 5/120)
+[2026-06-22 08:40:22] [I2P Manager] SAM Bridge is online gekomen en luistert!
+[2026-06-22 08:40:22] [I2P Manager] SAM Bridge gedetecteerd. Initialiseren van SAM stream sessie...
+[2026-06-22 08:40:46] [I2P Manager] I2P is ONLINE. Base32 adres: pengxzvu5irbfys3by2de4nzbo3bkigxbqd4zbuob2ddnffgkxea.b32.i2p
+[2026-06-22 08:40:46] P2P Node is online als 'null' op I2P.
+[2026-06-22 08:40:46] I2P Destination: pengxzvu5irbfys3by2de4nzbo3bkigxbqd4zbuob2ddnffgkxea.b32.i2p
+[2026-06-22 08:40:56] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 08:40:56] [Login] Online als 'SleepyFlo'.
+[2026-06-22 08:40:56] [I2P Manager] Adres succesvol geregistreerd op directory server: pengxzvu5irbfys3by2de4nzbo3bkigxbqd4zbuob2ddnffgkxea.b32.i2p
+[2026-06-22 08:42:13] [P2P Ontvanger] I2P SAM tunnel peer verbonden. Handshake starten...
+[2026-06-22 08:42:13] 
+[P2P Ontvanger] Inkomende P2P-verbinding geaccepteerd.
+[2026-06-22 08:42:17] [P2P Ontvanger] Wachten op UI-beslissing voor '1782117731281_test.txt'...
+[2026-06-22 08:42:17] [Ontvanger] Inkomend: '1782117731281_test.txt' van 'test' (0.01 MB) — wacht op UI-beslissing...
+[2026-06-22 08:42:22] [Ontvanger] Geaccepteerd: '1782117731281_test.txt' van 'test'.
+[2026-06-22 08:42:22] [P2P Ontvanger] Overdracht geaccepteerd. Start download...
+[2026-06-22 08:42:23] [P2P Ontvanger] 2e Envelop ontsleuteld. Verwachte hash: 686845f12255b7831fa77c0e1b9f7eba41a8fd0815d67031282a295441de9475
+[2026-06-22 08:42:24] [P2P Ontvanger] Bestand succesvol opgeslagen: 1782117731281_test.txt
+[2026-06-22 08:43:58] [Verzender] Start: '1782117731281_test.txt' → 'testtest'...
+[2026-06-22 08:43:58] [P2P Verzender] Vraag adres op van 'testtest'...
+[2026-06-22 08:43:59] [P2P Verzender] Maak anonieme verbinding via SOCKS5 proxy naar vdqilyamyx6olofign4lroayl47527gwjmwbldaqho2s7oem5c5a.b32.i2p...
+[2026-06-22 08:43:59] [P2P Verzender] Verbonden met peer 'testtest'. Wachten op RSA sleutel...
+[2026-06-22 08:44:04] [P2P Verzender] RSA Public Key ontvangen van peer.
+[2026-06-22 08:44:04] [P2P Verzender] Gecodeerde metadata handshake verzonden. Wachten op acceptatie...
+[2026-06-22 08:44:14] [P2P Verzender] Overdracht geaccepteerd! Start payload streaming...
+[2026-06-22 09:35:02] [Shutdown] Terminatie ontvangen. Server stopt...
+[2026-06-22 09:35:02] [I2P Manager] Stoppen van lokale i2pd daemon...
+
+============================================================
+[2026-06-22T09:35:20.581Z] NEXUS SHARE gestart
+============================================================
+[2026-06-22 09:35:20] 
+[2026-06-22 09:35:20] ╔══════════════════════════════════════════════════╗
+[2026-06-22 09:35:20] ║         NEXUS SHARE — Web UI (p2p.js)            ║
+[2026-06-22 09:35:20] ╠══════════════════════════════════════════════════╣
+[2026-06-22 09:35:20] ║  URL:  http://localhost:3000                      ║
+[2026-06-22 09:35:20] ║  Log:  nexus.log                                  ║
+[2026-06-22 09:35:20] ╚══════════════════════════════════════════════════╝
+[2026-06-22 09:35:20] 
+[2026-06-22 09:35:20] Browser opent automatisch. Druk CTRL+C om te stoppen.
+[2026-06-22 09:35:20] [Server] Web UI actief op poort 3000.
+[2026-06-22 09:35:20] [I2P Manager] SAM Bridge offline, maar lokale i2pd.exe gevonden. Starten...
+[2026-06-22 09:35:20] [I2P Manager] i2pd daemon gestart in achtergrond. Wachten tot SAM Bridge online komt...
+[2026-06-22 09:35:25] [I2P Manager] Wachten tot SAM Bridge online komt... (poging 5/120)
+[2026-06-22 09:35:26] [I2P Manager] SAM Bridge is online gekomen en luistert!
+[2026-06-22 09:35:26] [I2P Manager] SAM Bridge gedetecteerd. Initialiseren van SAM stream sessie...
+[2026-06-22 09:35:53] [I2P Manager] I2P is ONLINE. Base32 adres: q3nppgjdn2r5ng25sop255w6jvyjwkmq2zs2ao3eqvhsehdaam6q.b32.i2p
+[2026-06-22 09:35:53] P2P Node is online als 'null' op I2P.
+[2026-06-22 09:35:53] I2P Destination: q3nppgjdn2r5ng25sop255w6jvyjwkmq2zs2ao3eqvhsehdaam6q.b32.i2p
+[2026-06-22 09:39:23] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 09:39:23] [Login] Online als 'SleepyFlo'.
+[2026-06-22 09:39:23] [I2P Manager] Adres succesvol geregistreerd op directory server: q3nppgjdn2r5ng25sop255w6jvyjwkmq2zs2ao3eqvhsehdaam6q.b32.i2p
+[2026-06-22 09:40:31] [Verzender] Start: 'images.jpg' → 'testtest'...
+[2026-06-22 09:40:31] [P2P Verzender] Vraag adres op van 'testtest'...
+[2026-06-22 09:40:31] [P2P Verzender] Maak anonieme verbinding via SOCKS5 proxy naar e33ycnryqc62qrweccomqxpcvsggaskkrdahxvfvjcgdfyoakcsq.b32.i2p...
+[2026-06-22 09:40:35] [FOUT] [P2P Verzender] Kan niet verbinden via SOCKS5: SOCKS5 tunnel mislukt met code: 4
+[2026-06-22 09:40:35] [Verzender] 'images.jpg' succesvol verzonden naar 'testtest'.
+[2026-06-22 09:52:00] [P2P Ontvanger] I2P SAM tunnel peer verbonden. Handshake starten...
+[2026-06-22 09:52:00] 
+[P2P Ontvanger] Inkomende P2P-verbinding geaccepteerd.
+[2026-06-22 09:52:03] [P2P Ontvanger] Wachten op UI-beslissing voor '1782121916387_Dag3_FileTransfer.docx'...
+[2026-06-22 09:52:03] [Ontvanger] Inkomend: '1782121916387_Dag3_FileTransfer.docx' van 'Brandon' (0.02 MB) — wacht op UI-beslissing...
+[2026-06-22 09:52:18] [Ontvanger] Geaccepteerd: '1782121916387_Dag3_FileTransfer.docx' van 'Brandon'.
+[2026-06-22 09:52:18] [P2P Ontvanger] Overdracht geaccepteerd. Start download...
+[2026-06-22 09:52:19] [P2P Ontvanger] 2e Envelop ontsleuteld. Verwachte hash: 7b2b8a30c4f70a305aa0edeb7b1bc9db6d226f31889778a9c274bad489246e72
+[2026-06-22 09:52:21] [P2P Ontvanger] Bestand succesvol opgeslagen: 1782121916387_Dag3_FileTransfer.docx
+
+============================================================
+[2026-06-22T11:16:09.716Z] NEXUS SHARE gestart
+============================================================
+[2026-06-22 11:16:09] 
+[2026-06-22 11:16:09] ╔══════════════════════════════════════════════════╗
+[2026-06-22 11:16:09] ║         NEXUS SHARE — Web UI (p2p.js)            ║
+[2026-06-22 11:16:09] ╠══════════════════════════════════════════════════╣
+[2026-06-22 11:16:09] ║  URL:  http://localhost:3000                      ║
+[2026-06-22 11:16:09] ║  Log:  nexus.log                                  ║
+[2026-06-22 11:16:09] ╚══════════════════════════════════════════════════╝
+[2026-06-22 11:16:09] 
+[2026-06-22 11:16:09] Browser opent automatisch. Druk CTRL+C om te stoppen.
+[2026-06-22 11:16:09] [Server] Web UI actief op poort 3000.
+[2026-06-22 11:16:09] [I2P Manager] SAM Bridge is al actief op poort 7656.
+[2026-06-22 11:16:09] [I2P Manager] SAM Bridge gedetecteerd. Initialiseren van SAM stream sessie...
+[2026-06-22 11:16:21] [I2P Manager] I2P is ONLINE. Base32 adres: u5fwthlpbj6nbtnmg73lprthnl6ssxuoc5dgotb2co4dvudi7htq.b32.i2p
+[2026-06-22 11:16:21] P2P Node is online als 'null' op I2P.
+[2026-06-22 11:16:21] I2P Destination: u5fwthlpbj6nbtnmg73lprthnl6ssxuoc5dgotb2co4dvudi7htq.b32.i2p
+[2026-06-22 11:17:35] [Register] Registreren van 'charlie'...
+[2026-06-22 11:17:35] [Register] Succes: 'charlie' aangemaakt.
+[2026-06-22 11:18:23] [Register] Registreren van 'alice'...
+[2026-06-22 11:18:24] [Register] Succes: 'alice' aangemaakt.
+[2026-06-22 11:18:35] [Register] Registreren van 'alice'...
+[2026-06-22 11:18:35] [Register] Mislukt: Gebruikersnaam bestaat al
+[2026-06-22 11:22:54] [Register] Registreren van 'Alice; DROP'...
+[2026-06-22 11:22:54] [Register] Mislukt: Gebruikersnaam bevat ongeldige tekens
+[2026-06-22 11:23:27] [Register] Registreren van 'SHEOINSOlkvmpiarnvpjadsplmapirubnpaokdsmcvpvlamelkbmpadofjmvpoajnefpinaspieuba'...
+[2026-06-22 11:23:27] [Register] Mislukt: Gebruikersnaam moet tussen 3 en 32 tekens bevatten
+[2026-06-22 11:24:51] [Shutdown] Terminatie ontvangen. Server stopt...
+
+============================================================
+[2026-06-22T11:25:01.356Z] NEXUS SHARE gestart
+============================================================
+[2026-06-22 11:25:01] 
+[2026-06-22 11:25:01] ╔══════════════════════════════════════════════════╗
+[2026-06-22 11:25:01] ║         NEXUS SHARE — Web UI (p2p.js)            ║
+[2026-06-22 11:25:01] ╠══════════════════════════════════════════════════╣
+[2026-06-22 11:25:01] ║  URL:  http://localhost:3000                      ║
+[2026-06-22 11:25:01] ║  Log:  nexus.log                                  ║
+[2026-06-22 11:25:01] ╚══════════════════════════════════════════════════╝
+[2026-06-22 11:25:01] 
+[2026-06-22 11:25:01] Browser opent automatisch. Druk CTRL+C om te stoppen.
+[2026-06-22 11:25:01] [Server] Web UI actief op poort 3000.
+[2026-06-22 11:25:01] [I2P Manager] SAM Bridge is al actief op poort 7656.
+[2026-06-22 11:25:01] [I2P Manager] SAM Bridge gedetecteerd. Initialiseren van SAM stream sessie...
+[2026-06-22 11:25:13] [I2P Manager] I2P is ONLINE. Base32 adres: galsmwprh64j7qpdhvomor3qazvlapsjc7rdb2hvt3mcsuymecda.b32.i2p
+[2026-06-22 11:25:13] P2P Node is online als 'null' op I2P.
+[2026-06-22 11:25:13] I2P Destination: galsmwprh64j7qpdhvomor3qazvlapsjc7rdb2hvt3mcsuymecda.b32.i2p
+[2026-06-22 11:30:05] [Login] Inloggen als 'xxx'...
+[2026-06-22 11:30:05] [Login] Mislukt: Ongeldige inloggegevens
+[2026-06-22 11:30:17] [Login] Inloggen als 'alice'...
+[2026-06-22 11:30:18] [Login] Mislukt: Ongeldige inloggegevens
+[2026-06-22 11:36:44] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 11:36:44] [Auth] DNS lookup mislukt voor webgenie-ai.com. Herprobeer via www.webgenie-ai.com...
+[2026-06-22 11:36:44] [Login] Mislukt: Kan geen verbinding maken met authenticatieserver: getaddrinfo ENOTFOUND www.webgenie-ai.com
+[2026-06-22 11:36:45] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 11:36:45] [Auth] DNS lookup mislukt voor webgenie-ai.com. Herprobeer via www.webgenie-ai.com...
+[2026-06-22 11:36:45] [Login] Mislukt: Kan geen verbinding maken met authenticatieserver: getaddrinfo ENOTFOUND www.webgenie-ai.com
+[2026-06-22 11:36:55] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 11:36:55] [Auth] DNS lookup mislukt voor webgenie-ai.com. Herprobeer via www.webgenie-ai.com...
+[2026-06-22 11:36:55] [Login] Mislukt: Kan geen verbinding maken met authenticatieserver: getaddrinfo ENOTFOUND www.webgenie-ai.com
+[2026-06-22 11:48:00] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 11:48:00] [Auth] DNS lookup mislukt voor webgenie-ai.com. Herprobeer via www.webgenie-ai.com...
+[2026-06-22 11:48:00] [Login] Mislukt: Kan geen verbinding maken met authenticatieserver: getaddrinfo ENOTFOUND www.webgenie-ai.com
+[2026-06-22 11:52:17] [Shutdown] Terminatie ontvangen. Server stopt...
+
+============================================================
+[2026-06-22T11:52:24.029Z] NEXUS SHARE gestart
+============================================================
+[2026-06-22 11:52:24] 
+[2026-06-22 11:52:24] ╔══════════════════════════════════════════════════╗
+[2026-06-22 11:52:24] ║         NEXUS SHARE — Web UI (p2p.js)            ║
+[2026-06-22 11:52:24] ╠══════════════════════════════════════════════════╣
+[2026-06-22 11:52:24] ║  URL:  http://localhost:3000                      ║
+[2026-06-22 11:52:24] ║  Log:  nexus.log                                  ║
+[2026-06-22 11:52:24] ╚══════════════════════════════════════════════════╝
+[2026-06-22 11:52:24] 
+[2026-06-22 11:52:24] Browser opent automatisch. Druk CTRL+C om te stoppen.
+[2026-06-22 11:52:24] [Server] Web UI actief op poort 3000.
+[2026-06-22 11:52:24] [I2P Manager] SAM Bridge is al actief op poort 7656.
+[2026-06-22 11:52:24] [I2P Manager] SAM Bridge gedetecteerd. Initialiseren van SAM stream sessie...
+[2026-06-22 11:52:54] [I2P Manager] I2P is ONLINE. Base32 adres: lugrb4grsnl5i5wod4ktihldls5ovtvlt5kviw34aqetf3htjxfq.b32.i2p
+[2026-06-22 11:52:54] P2P Node is online als 'null' op I2P.
+[2026-06-22 11:52:54] I2P Destination: lugrb4grsnl5i5wod4ktihldls5ovtvlt5kviw34aqetf3htjxfq.b32.i2p
+[2026-06-22 11:53:03] [Login] Inloggen als 'SleepyFlo'...
+[2026-06-22 11:53:04] [Login] Online als 'SleepyFlo'.
+[2026-06-22 11:53:04] [I2P Manager] Adres succesvol geregistreerd op directory server: lugrb4grsnl5i5wod4ktihldls5ovtvlt5kviw34aqetf3htjxfq.b32.i2p
