@@ -8,10 +8,22 @@
  */
 
 error_reporting(E_ALL);
-ini_set('display_errors', '1');
+ini_set('display_errors', PHP_SAPI === 'cli' ? '1' : '0');
 
-$userDbFile = __DIR__ . '/users.json';
-$sessionDbFile = __DIR__ . '/sessions.json';
+$preferredDataDir = dirname(__DIR__) . '/nexus_data';
+$fallbackDataDir = __DIR__ . '/nexus_data';
+$dataDir = $preferredDataDir;
+
+if (!is_dir($dataDir) && !@mkdir($dataDir, 0700, true) && !is_dir($dataDir)) {
+    $dataDir = $fallbackDataDir;
+    if (!is_dir($dataDir)) {
+        @mkdir($dataDir, 0700, true);
+    }
+}
+
+$userDbFile = $dataDir . '/users.db.json';
+$sessionDbFile = $dataDir . '/sessions.db.json';
+$authStateFile = $dataDir . '/auth_state.db.json';
 
 if (!file_exists($userDbFile)) {
     file_put_contents($userDbFile, json_encode([]));
@@ -25,7 +37,19 @@ function loadJsonFile(string $filePath, array $fallback = []): array {
         return $fallback;
     }
 
-    $raw = file_get_contents($filePath);
+    $fp = @fopen($filePath, 'rb');
+    if ($fp === false) {
+        return $fallback;
+    }
+
+    $raw = '';
+    if (@flock($fp, LOCK_SH)) {
+        $read = stream_get_contents($fp);
+        $raw = $read === false ? '' : $read;
+        @flock($fp, LOCK_UN);
+    }
+    fclose($fp);
+
     if ($raw === false || $raw === '') {
         return $fallback;
     }
@@ -35,13 +59,109 @@ function loadJsonFile(string $filePath, array $fallback = []): array {
 }
 
 function saveJsonFile(string $filePath, array $data): void {
-    file_put_contents($filePath, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    $dir = dirname($filePath);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0700, true);
+    }
+
+    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if ($json === false) {
+        return;
+    }
+
+    $tmpFile = $filePath . '.tmp';
+    $fp = @fopen($tmpFile, 'wb');
+    if ($fp === false) {
+        return;
+    }
+
+    if (@flock($fp, LOCK_EX)) {
+        fwrite($fp, $json);
+        fflush($fp);
+        @flock($fp, LOCK_UN);
+    }
+    fclose($fp);
+
+    @rename($tmpFile, $filePath);
+    @chmod($filePath, 0600);
 }
 
 function jsonResponse(array $data, int $statusCode = 200): void {
     http_response_code($statusCode);
     header('Content-Type: application/json; charset=utf-8');
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: no-store');
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+}
+
+function enforceRateLimit(string $ip, string $authStateFile): ?array {
+    $state = loadJsonFile($authStateFile, []);
+    $now = time();
+
+    foreach ($state as $key => $entry) {
+        $windowStart = isset($entry['window_start']) ? (int)$entry['window_start'] : $now;
+        $blockedUntil = isset($entry['blocked_until']) ? (int)$entry['blocked_until'] : 0;
+        if (($now - $windowStart) > 86400 && $blockedUntil < $now) {
+            unset($state[$key]);
+        }
+    }
+
+    if (!isset($state[$ip])) {
+        $state[$ip] = [
+            'window_start' => $now,
+            'count' => 0,
+            'failed_logins' => 0,
+            'blocked_until' => 0,
+        ];
+    }
+
+    $entry = &$state[$ip];
+    if (!empty($entry['blocked_until']) && (int)$entry['blocked_until'] > $now) {
+        saveJsonFile($authStateFile, $state);
+        return ['status' => 'error', 'message' => 'IP-adres is tijdelijk geblokkeerd wegens misbruik.'];
+    }
+
+    if (($now - (int)$entry['window_start']) >= 60) {
+        $entry['window_start'] = $now;
+        $entry['count'] = 0;
+    }
+
+    $entry['count'] = ((int)$entry['count']) + 1;
+    if ((int)$entry['count'] > 60) {
+        $entry['blocked_until'] = $now + 60;
+        saveJsonFile($authStateFile, $state);
+        return ['status' => 'error', 'message' => 'Te veel verzoeken. Probeer over 1 minuut opnieuw.'];
+    }
+
+    saveJsonFile($authStateFile, $state);
+    return null;
+}
+
+function recordLoginResult(string $ip, bool $success, string $authStateFile): void {
+    $state = loadJsonFile($authStateFile, []);
+    $now = time();
+
+    if (!isset($state[$ip])) {
+        $state[$ip] = [
+            'window_start' => $now,
+            'count' => 0,
+            'failed_logins' => 0,
+            'blocked_until' => 0,
+        ];
+    }
+
+    if ($success) {
+        $state[$ip]['failed_logins'] = 0;
+    } else {
+        $failed = (int)($state[$ip]['failed_logins'] ?? 0) + 1;
+        $state[$ip]['failed_logins'] = $failed;
+        if ($failed >= 5) {
+            $state[$ip]['blocked_until'] = $now + 900;
+            $state[$ip]['failed_logins'] = 0;
+        }
+    }
+
+    saveJsonFile($authStateFile, $state);
 }
 
 function valideerSessie(string $token, array $sessies): bool {
@@ -193,6 +313,12 @@ if (PHP_SAPI !== 'cli') {
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
+    $rateError = enforceRateLimit($ip, $authStateFile);
+    if ($rateError !== null) {
+        jsonResponse($rateError, 429);
+        exit;
+    }
+
     if ($method !== 'POST') {
         jsonResponse([
             'status' => 'error',
@@ -202,6 +328,10 @@ if (PHP_SAPI !== 'cli') {
     }
 
     $raw = file_get_contents('php://input');
+    if ($raw !== false && strlen($raw) > 8192) {
+        jsonResponse(['status' => 'error', 'message' => 'Payload te groot'], 413);
+        exit;
+    }
     $data = json_decode($raw ?? '', true);
 
     if (!is_array($data)) {
@@ -222,6 +352,11 @@ if (PHP_SAPI !== 'cli') {
     }
 
     $response = verwerkActie($data, $ip, $gebruikers, $sessies);
+
+    $actie = isset($data['action']) ? (string)$data['action'] : '';
+    if ($actie === 'login') {
+        recordLoginResult($ip, (($response['status'] ?? 'error') === 'success'), $authStateFile);
+    }
 
     saveJsonFile($userDbFile, $gebruikers);
     saveJsonFile($sessionDbFile, $sessies);
