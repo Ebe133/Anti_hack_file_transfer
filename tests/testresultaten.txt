@@ -27,7 +27,7 @@ Test Case 02-E  [   ]  resultaat: geweigerd.
 
 User Story 03 brute force
 Test Case 03-N  [   ]  resultaat: Goede login lukt na 2x fout wachtwoord, krijgt gewoon token (32 hex) terug. Werkt, maar er is geen teller die gereset wordt.
-Test Case 03-F  [   ]  resultaat: FAIL - geen blokkade. 6x fout vanaf zelfde ip geeft elke keer "Ongeldige inloggegevens", er is geen rate limiting / ip-block.
+Test Case 03-F  [ OK ]  resultaat: OK - na 5 foute pogingen vanaf hetzelfde ip wordt het ip geblokkeerd: de 6e poging (en verder) geeft "IP-adres is tijdelijk geblokkeerd wegens misbruik" (zie nexus.log 09:17:17-09:17:25). Rate limiting / ip-block werkt op de online server (webgenie-ai.com/server.php). LET OP: de lokale server.php in deze repo heeft deze bescherming NIET; de eerdere FAIL kwam doordat tegen de lokale socket-modus is getest.
 Test Case 03-E  [   ]  resultaat: FAIL - ip wordt niet geblokkeerd. Na 10x fout wordt het goede wachtwoord nog gewoon geaccepteerd (token teruggegeven).
 
 
@@ -100,13 +100,14 @@ Test Case 14-E  [   ]  resultaat: N.v.t - vereist web UI (acties na logout).
 
 samenvatting
   totaal testcases : 42
-  OK               : 23
-  FAIL          : 4   (03-F, 03-E, 12-F, 12-E)
+  OK               : 24
+  FAIL          : 3   (03-E, 12-F, 12-E)
   nog te doen      : 15  (US06, US07, US08, US13, US14 - vereisen live I2P + browser)
 
 opmerkingen / gevonden bugs:
-  - Geen brute-force bescherming: login telt mislukte pogingen niet en blokkeert ip's niet.
-    Na 10x fout wordt een goed wachtwoord nog gewoon geaccepteerd (03-F, 03-E).
+  - Brute-force bescherming werkt op de online server (webgenie-ai.com/server.php):
+    na 5 foute pogingen wordt het ip geblokkeerd (03-F OK). De lokale server.php in deze
+    repo mist deze bescherming nog; 03-E moet nog tegen de online server hertest worden.
   - Geen bestandstype-/extensiefilter: .exe, .bat, .js en misleidende dubbele extensies
     (factuur.pdf.exe) worden geaccepteerd (12-F, 12-E). In testplan al verwacht als faler.
   - Sessies zijn in de gehoste web-modus niet puur in RAM: ze blijven server-side bewaard
