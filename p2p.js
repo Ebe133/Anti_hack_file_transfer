@@ -1,834 +1,399 @@
-/**
- * Day 3: Unified Secure Peer-to-Peer Node (p2p.js) - I2P & Zero-Knowledge Handshake
- * 
- * Deze node combineert client- (verzender) en server- (ontvanger) functionaliteiten.
- * - Registreert en logt in bij de centrale server.php (Zero-Knowledge, RAM-only sessies).
- * - Indien I2P is ingeschakeld, registreert de node zijn I2P Base32-adres (.b32.i2p).
- * - SOCKS5 proxy wordt gebruikt om anoniem te verbinden met I2P-destinations.
- * - SAM Bridge wordt gebruikt om anonieme stream tunnels aan te maken voor inkomende bestanden.
- * - Directe handshakes en bestandsoverdrachten zijn end-to-end gecodeerd (RSA + ChaCha20-Poly1305) 
- *   en worden volledig lokaal en autonoom afgehandeld (geen database verificatie tijdens transfers).
- */
+const net = require('net'), fs = require('fs'), path = require('path'), crypto = require('crypto'), 
+  {execSync, spawn, exec} = require('child_process'), https = require('https'), http = require('http');
 
-const net = require('net');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const { execSync, spawn, exec } = require('child_process');
-const https = require('https');
-const http = require('http');
+let TOKEN = null, UI_P = process.env.UI_PORT ? parseInt(process.env.UI_PORT, 10) : 3000,
+  PUB = path.join(__dirname, 'public'), REC = process.env.RECEIVED_DIR ? path.resolve(process.env.RECEIVED_DIR) : path.join(__dirname, 'received'),
+  AUTH_URL = process.env.AUTH_SERVER_URL || 'https://webgenie-ai.com/server.php';
 
-// ── Web UI configuratie (direct beschikbaar voor startWebUI) ────────────────
-// Per-start veiligheidstoken, geïnjecteerd in de HTML
-let WEB_SESSION_TOKEN = null;
+let parsed = null;
+try { parsed = new URL(AUTH_URL); } catch {}
 
-const UI_PORT = process.env.UI_PORT ? parseInt(process.env.UI_PORT, 10) : 3000;
-const PUBLIC_DIR = path.join(__dirname, 'public');
-const RECEIVED_DIR = process.env.RECEIVED_DIR ? path.resolve(process.env.RECEIVED_DIR) : path.join(__dirname, 'received');
-const AUTH_SERVER_URL = process.env.AUTH_SERVER_URL || 'https://webgenie-ai.com/server.php';
+const USE_HTTP = process.env.AUTH_USE_HTTP ? process.env.AUTH_USE_HTTP === '1' : parsed !== null,
+  HOST = process.env.AUTH_HOST || (parsed ? parsed.hostname : '127.0.0.1'),
+  PORT = process.env.AUTH_PORT_UI ? parseInt(process.env.AUTH_PORT_UI, 10) : (parsed ? (parsed.port ? parseInt(parsed.port, 10) : (parsed.protocol === 'https:' ? 443 : 80)) : 8000),
+  PATH = process.env.AUTH_PATH || (parsed ? `${parsed.pathname}${parsed.search}` : '/server.php'),
+  IS_HTTPS = parsed ? parsed.protocol === 'https:' : false,
+  LPORT = process.env.LISTEN_PORT ? parseInt(process.env.LISTEN_PORT, 10) : 9090,
+  LOG_MAX = 500, LOG_FILE = process.env.LOG_FILE ? path.resolve(process.env.LOG_FILE) : path.join(__dirname, 'nexus.log'),
+  logSt = fs.createWriteStream(LOG_FILE, {flags: 'a'});
 
-let parsedAuthUrl = null;
-try {
-  parsedAuthUrl = new URL(AUTH_SERVER_URL);
-} catch {
-  parsedAuthUrl = null;
+const I2P = {samHost: process.env.I2P_SAM_HOST || '127.0.0.1', samPort: process.env.I2P_SAM_PORT ? parseInt(process.env.I2P_SAM_PORT, 10) : 7656,
+  socksHost: process.env.I2P_SOCKS_HOST || '127.0.0.1', socksPort: process.env.I2P_SOCKS_PORT ? parseInt(process.env.I2P_SOCKS_PORT, 10) : 4447};
+
+const i2p = {status: 'offline', addr: null, sock: null, sid: null, err: null};
+const web = {isOn: false, user: null, i2pAddr: null, tok: null, logs: [], transfers: {send: {}, recv: {}}};
+
+const _log = console.log.bind(console), _err = console.error.bind(console);
+
+function log(m) {
+  _log(m);
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const ln = `[${ts}] ${m}`;
+  logSt.write(ln + '\n');
+  web.logs.push(ln);
+  if (web.logs.length > LOG_MAX) web.logs.shift();
 }
 
-const AUTH_USE_HTTP = process.env.AUTH_USE_HTTP
-  ? process.env.AUTH_USE_HTTP === '1'
-  : parsedAuthUrl !== null;
-const AUTH_HOST = process.env.AUTH_HOST || (parsedAuthUrl ? parsedAuthUrl.hostname : '127.0.0.1');
-const AUTH_PORT_UI = process.env.AUTH_PORT_UI
-  ? parseInt(process.env.AUTH_PORT_UI, 10)
-  : (parsedAuthUrl ? (parsedAuthUrl.port ? parseInt(parsedAuthUrl.port, 10) : (parsedAuthUrl.protocol === 'https:' ? 443 : 80)) : 8000);
-const AUTH_PATH = process.env.AUTH_PATH || (parsedAuthUrl ? `${parsedAuthUrl.pathname}${parsedAuthUrl.search}` : '/server.php');
-const AUTH_IS_HTTPS = parsedAuthUrl ? parsedAuthUrl.protocol === 'https:' : false;
-const LISTEN_PORT = process.env.LISTEN_PORT ? parseInt(process.env.LISTEN_PORT, 10) : 9090;
-const LOG_MAX = 500;
-
-function sanitizeUsernameForPath(username) {
-  return String(username || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
-}
-
-function getReceivedDirForUsername(username) {
-  const safeUser = sanitizeUsernameForPath(username);
-  if (!safeUser) return RECEIVED_DIR;
-  return path.join(RECEIVED_DIR, safeUser);
-}
-
-function getCurrentUserReceivedDir() {
-  return getReceivedDirForUsername(webState.username);
-}
-
-// Log bestand — alle berichten worden hierheen geschreven
-const LOG_FILE  = process.env.LOG_FILE ? path.resolve(process.env.LOG_FILE) : path.join(__dirname, 'nexus.log');
-const logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
-
-// I2P Configuratie
-const I2P_CONFIG = {
-  samHost: process.env.I2P_SAM_HOST || '127.0.0.1',
-  samPort: process.env.I2P_SAM_PORT ? parseInt(process.env.I2P_SAM_PORT, 10) : 7656,
-  socksHost: process.env.I2P_SOCKS_HOST || '127.0.0.1',
-  socksPort: process.env.I2P_SOCKS_PORT ? parseInt(process.env.I2P_SOCKS_PORT, 10) : 4447
+console.log = log;
+console.error = (m) => {
+  _err(m);
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const ln = `[${ts}] [ERR] ${m}`;
+  logSt.write(ln + '\n');
+  web.logs.push(ln);
+  if (web.logs.length > LOG_MAX) web.logs.shift();
 };
 
-// Globale status voor I2P verbinding
-const i2pState = {
-  status: 'offline', // 'offline', 'starting', 'online', 'error'
-  address: null,
-  samSocket: null,
-  sessionID: null,
-  error: null
-};
+const safe = (u) => String(u || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+const getDir = (u) => {const s = safe(u); return s ? path.join(REC, s) : REC;};
+const getCurDir = () => getDir(web.user);
 
-/**
- * Beslist of een verbinding met de central server rechtstreeks of via de SOCKS5 proxy (indien I2P host) verloopt.
- */
-function connectToAuthServer(authHost, authPort, callback) {
-  if (authHost.endsWith('.i2p')) {
-    webLog(`[Verbinding] Routeren van auth server verzoek naar ${authHost} via SOCKS5 proxy...`);
-    connectSocks5(I2P_CONFIG.socksHost, I2P_CONFIG.socksPort, authHost, 80, callback);
-  } else {
-    const errorHandler = err => {
-      callback(err);
-    };
-    const socket = net.connect({ host: authHost, port: parseInt(authPort, 10) }, () => {
-      socket.removeListener('error', errorHandler);
-      callback(null, socket);
+const MIME = {'.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', 
+  '.ico': 'image/x-icon', '.png': 'image/png', '.svg': 'image/svg+xml'};
+
+function sendJSON(res, code, o) {
+  const body = JSON.stringify(o);
+  res.writeHead(code, {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store'});
+  res.end(body);
+}
+
+function readBody(req, mx = 10 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let got = 0;
+    req.on('data', c => {
+      got += c.length;
+      if (got > mx) {req.removeAllListeners('data'); reject(new Error('Payload too large')); return;}
+      chunks.push(c);
     });
-    socket.on('error', errorHandler);
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function serveStatic(res, fPath) {
+  const ext = path.extname(fPath).toLowerCase(), mime = MIME[ext] || 'application/octet-stream';
+  fs.readFile(fPath, (e, d) => {
+    if (e) {res.writeHead(404); res.end('Not Found'); return;}
+    res.writeHead(200, {'Content-Type': mime});
+    res.end(d);
+  });
+}
+
+function serveIndex(res) {
+  fs.readFile(path.join(PUB, 'index.html'), 'utf8', (e, h) => {
+    if (e) {res.writeHead(500); res.end('UI not found'); return;}
+    const inj = h.replace('__SESSION_TOKEN_PLACEHOLDER__', TOKEN);
+    res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8'});
+    res.end(inj);
+  });
+}
+
+function connAuth(host, port, cb) {
+  if (host.endsWith('.i2p')) {
+    log(`[Conn] Route to ${host} via SOCKS5...`);
+    connSocks5(I2P.socksHost, I2P.socksPort, host, 80, cb);
+  } else {
+    const h = e => cb(e), sock = net.connect({host, port: parseInt(port, 10)}, () => {
+      sock.removeListener('error', h);
+      cb(null, sock);
+    });
+    sock.on('error', h);
   }
 }
 
-/**
- * Verstuurt een auth-verzoek naar de centrale server via HTTP(S) of legacy TCP JSON-lijnprotocol.
- */
-function sendAuthRequest(payload, callback, authHost = AUTH_HOST, authPort = AUTH_PORT_UI) {
-  if (AUTH_USE_HTTP) {
-    const transport = AUTH_IS_HTTPS ? https : http;
-    const requestData = JSON.stringify(payload);
-    const primaryHost = authHost || AUTH_HOST;
-    const fallbackHost = primaryHost.startsWith('www.') ? primaryHost : `www.${primaryHost}`;
-
-    let completed = false;
-    let triedFallback = false;
-    let attempts = 0;
-    const maxAttempts = 3;
-
-    const finish = (err, parsed) => {
-      if (completed) return;
-      completed = true;
-      callback(err, parsed);
-    };
-
-    const makeRequest = (hostname) => {
-      attempts++;
-      const req = transport.request({
-        hostname,
-        port: authPort,
-        path: AUTH_PATH,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(requestData),
-          'Accept': 'application/json'
-        },
-        timeout: 8000 // 8 seconden timeout
-      }, (res) => {
-        let body = '';
-        res.on('data', chunk => body += chunk.toString());
-        res.on('end', () => {
-          const contentType = String(res.headers['content-type'] || '').toLowerCase();
-          const trimmedBody = body.trim();
-
-          // Sommige gratis hosts (o.a. InfinityFree) geven een JS anti-bot challenge
-          // terug i.p.v. JSON voor server-to-server requests.
-          if (contentType.includes('text/html') || trimmedBody.startsWith('<')) {
-            if (trimmedBody.includes('__test=') || trimmedBody.includes('slowAES.decrypt') || trimmedBody.includes('enable Javascript')) {
-              finish(new Error('Auth server wordt afgeschermd door anti-bot HTML challenge (geen JSON API-respons). Gebruik hosting zonder JS challenge voor API-verkeer.'));
+function sendAuth(payload, cb, host = HOST, port = PORT) {
+  if (USE_HTTP) {
+    const tr = IS_HTTPS ? https : http, data = JSON.stringify(payload), primHost = host || HOST, 
+      fallHost = primHost.startsWith('www.') ? primHost : `www.${primHost}`;
+    let done = false, tried = false, att = 0, maxAtt = 3;
+    const fin = (e, p) => {if (done) return; done = true; cb(e, p);};
+    const mkReq = (hostname) => {
+      att++;
+      const req = tr.request({hostname, port, path: PATH, method: 'POST', 
+        headers: {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), 'Accept': 'application/json'}, timeout: 8000}, 
+        (res) => {
+          let body = '';
+          res.on('data', chunk => body += chunk.toString());
+          res.on('end', () => {
+            const ct = String(res.headers['content-type'] || '').toLowerCase(), tb = body.trim();
+            if ((ct.includes('text/html') || tb.startsWith('<')) && (tb.includes('__test=') || tb.includes('slowAES') || tb.includes('Javascript'))) {
+              fin(new Error('Auth server has anti-bot challenge'));
               return;
             }
-          }
-
-          try {
-            const parsed = JSON.parse(trimmedBody);
-            finish(null, parsed);
-          } catch {
-            const preview = trimmedBody.slice(0, 140).replace(/\s+/g, ' ');
-            finish(new Error(`Ongeldig JSON-antwoord van auth server (HTTP ${res.statusCode || 'n/a'}, content-type: ${contentType || 'onbekend'}, body: ${preview})`));
-          }
+            try {fin(null, JSON.parse(tb));} catch {fin(new Error(`Invalid JSON response (HTTP ${res.statusCode || 'n/a'})`));}
+          });
         });
-      });
-
-      req.on('timeout', () => {
-        req.destroy(new Error('ETIMEDOUT'));
-      });
-
-      req.on('error', (err) => {
-        const isDnsErr = err && (
-          err.code === 'ENOTFOUND' ||
-          err.code === 'EAI_AGAIN' ||
-          (err.errors && err.errors.some(e => e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN')) ||
-          String(err.message || '').includes('ENOTFOUND') ||
-          String(err.message || '').includes('EAI_AGAIN') ||
-          String(err.name || '').includes('AggregateError')
-        );
-
-        if (!triedFallback && isDnsErr && hostname === primaryHost && fallbackHost !== primaryHost) {
-          triedFallback = true;
-          webLog(`[Auth] DNS lookup mislukt voor ${primaryHost}. Herprobeer via ${fallbackHost}...`);
-          makeRequest(fallbackHost);
+      req.on('timeout', () => req.destroy(new Error('ETIMEDOUT')));
+      req.on('error', (e) => {
+        const isDns = e && (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN' || String(e.message || '').includes('ENOTFOUND'));
+        if (!tried && isDns && hostname === primHost && fallHost !== primHost) {
+          tried = true;
+          log(`[Auth] DNS failed for ${primHost}. Try ${fallHost}...`);
+          mkReq(fallHost);
           return;
         }
-
-        if (attempts < maxAttempts) {
-          const delay = 500 * attempts;
-          webLog(`[Auth] Netwerkfout (${err.message || err.code || 'onbekend'}). Herproberen (${attempts}/${maxAttempts}) over ${delay}ms...`);
-          setTimeout(() => {
-            makeRequest(hostname);
-          }, delay);
+        if (att < maxAtt) {
+          const dl = 500 * att;
+          log(`[Auth] Net error. Retry (${att}/${maxAtt}) in ${dl}ms...`);
+          setTimeout(() => mkReq(hostname), dl);
           return;
         }
-
-        finish(err);
+        fin(e);
       });
-
-      req.write(requestData);
+      req.write(data);
       req.end();
     };
-
-    makeRequest(primaryHost);
+    mkReq(primHost);
     return;
   }
 
-  let tcpAttempts = 0;
-  const maxTcpAttempts = 3;
-
-  const tryTcpConnect = () => {
-    tcpAttempts++;
-    connectToAuthServer(authHost, authPort, (err, client) => {
-      if (err) {
-        if (tcpAttempts < maxTcpAttempts) {
-          const delay = 500 * tcpAttempts;
-          webLog(`[Auth] TCP verbinding mislukt. Herproberen (${tcpAttempts}/${maxTcpAttempts}) over ${delay}ms...`);
-          setTimeout(tryTcpConnect, delay);
+  let tcpAtt = 0, maxTcp = 3;
+  const tryTcp = () => {
+    tcpAtt++;
+    connAuth(host, port, (e, client) => {
+      if (e) {
+        if (tcpAtt < maxTcp) {
+          const dl = 500 * tcpAtt;
+          log(`[Auth] TCP failed. Retry (${tcpAtt}/${maxTcp}) in ${dl}ms...`);
+          setTimeout(tryTcp, dl);
           return;
         }
-        callback(err);
+        cb(e);
         return;
       }
-
       client.write(JSON.stringify(payload) + '\n');
-
-      let buffer = Buffer.alloc(0);
-      let answered = false;
-
+      let buf = Buffer.alloc(0), ans = false;
       client.on('data', data => {
-        if (answered) return;
-        buffer = Buffer.concat([buffer, data]);
-        const nl = buffer.indexOf(10);
+        if (ans) return;
+        buf = Buffer.concat([buf, data]);
+        const nl = buf.indexOf(10);
         if (nl === -1) return;
-
-        answered = true;
-        const line = buffer.slice(0, nl).toString().trim();
-        try {
-          callback(null, JSON.parse(line));
-        } catch {
-          callback(new Error('Ongeldige JSON-reactie van server'));
-        }
+        ans = true;
+        const ln = buf.slice(0, nl).toString().trim();
+        try {cb(null, JSON.parse(ln));} catch {cb(new Error('Invalid JSON response'));}
         client.destroy();
       });
-
-      client.on('error', e => {
-        if (answered) return;
-        answered = true;
-        callback(e);
-      });
+      client.on('error', e => {if (ans) return; ans = true; cb(e);});
     });
   };
-
-  tryTcpConnect();
+  tryTcp();
 }
 
-/**
- * Koppel een I2P Base32-adres aan de actieve sessie op de central directory server.
- */
-function updateAddressOnCentralServer(sessionToken, address, callback) {
-  sendAuthRequest({
-    action: 'update_address',
-    session_token: sessionToken,
-    address: address
-  }, (err, res) => {
-    if (err) {
-      webLog(`[I2P Manager] Netwerkfout bij adres registratie: ${err.message}`);
-      if (callback) callback(err);
-      return;
-    }
-
-    if (res.status === 'success') {
-      webLog(`[I2P Manager] Adres succesvol geregistreerd op directory server: ${address}`);
-      if (callback) callback(null);
-    } else {
-      webLog(`[I2P Manager] Adres registratie mislukt: ${res.message}`);
-      if (callback) callback(new Error(res.message || 'Onbekende auth server fout'));
-    }
+function updAddr(token, addr, cb) {
+  sendAuth({action: 'update_address', session_token: token, address: addr}, (e, res) => {
+    if (e) {log(`[I2P] Addr update error: ${e.message}`); if (cb) cb(e); return;}
+    if (res.status === 'success') {log(`[I2P] Addr registered: ${addr}`); if (cb) cb(null);} 
+    else {log(`[I2P] Addr register failed`); if (cb) cb(new Error(res.message || 'Auth err'));}
   });
 }
 
-/**
- * Bootst I2P op in de achtergrond en luistert naar inkomende verbindingen.
- */
 function bootI2P() {
-  i2pState.status = 'starting';
-  webLog('[I2P Manager] Achtergrond-opstart van I2P gestart...');
-  checkAndInstallI2P((i2pErr) => {
-    if (i2pErr) {
-      i2pState.status = 'error';
-      i2pState.error = i2pErr.message;
-      webLog(`[I2P Manager] I2P startfout: ${i2pErr.message}`);
-      return;
-    }
-    
-    webLog('[I2P Manager] SAM Bridge gedetecteerd. Initialiseren van SAM stream sessie...');
-    createSamSession(LISTEN_PORT, (err, sessionID, base64Destination, samSocket) => {
-      if (err) {
-        i2pState.status = 'error';
-        i2pState.error = err.message;
-        webLog(`[I2P Manager] Initialisatie SAM Bridge mislukt: ${err.message}`);
-        return;
-      }
-      
-      i2pState.status = 'online';
-      i2pState.address = convertI2PBase64toBase32(base64Destination);
-      i2pState.sessionID = sessionID;
-      i2pState.samSocket = samSocket;
-      webLog(`[I2P Manager] I2P is ONLINE. Base32 adres: ${i2pState.address}`);
-      
-      // Start de ontvanger luister-tunnel direct
-      startReceiver(
-        null, null, LISTEN_PORT,
-        AUTH_HOST, AUTH_PORT_UI,
-        i2pState.address, i2pState.sessionID,
-        false, onIncomingTransferUI
-      );
-      
-      // Indien de gebruiker al is ingelogd, registreer direct het adres bij de auth server!
-      if (webState.isOnline && webState.authToken) {
-        webState.myBase32Address = i2pState.address;
-        updateAddressOnCentralServer(webState.authToken, i2pState.address);
+  i2p.status = 'starting';
+  log('[I2P] Starting...');
+  chkI2P((e) => {
+    if (e) {i2p.status = 'error'; i2p.err = e.message; log(`[I2P] Start error: ${e.message}`); return;}
+    log('[I2P] SAM detected. Init session...');
+    mkSam(LPORT, (e, sid, b64, sock) => {
+      if (e) {i2p.status = 'error'; i2p.err = e.message; log(`[I2P] SAM init failed`); return;}
+      i2p.status = 'online';
+      i2p.addr = cvt64to32(b64);
+      i2p.sid = sid;
+      i2p.sock = sock;
+      log(`[I2P] ONLINE. Addr: ${i2p.addr}`);
+      startRecv(null, null, LPORT, HOST, PORT, i2p.addr, i2p.sid, false, onIncomingUI);
+      if (web.isOn && web.tok) {
+        web.i2pAddr = i2p.addr;
+        updAddr(web.tok, i2p.addr);
       }
     });
   });
 }
 
-// Start direct de Web UI bij opstarten
-if (require.main === module) {
-  startWebUI();
+if (require.main === module) startWebUI();
+
+function login(u, p, a, host, port, cb) {
+  sendAuth({action: 'login', username: u, password: p, address: a}, (e, res) => {
+    if (e) return cb(new Error('Auth server error: ' + e.message));
+    if (res.status === 'success') cb(null, res.session_token);
+    else cb(new Error(res.message || 'Auth failed'));
+  }, host, port);
 }
 
-
-/**
- * Logt in bij de PHP server en registreert ons anonieme I2P adres of IP:poort.
- */
-function login(username, password, address, authHost, authPort, callback) {
-  sendAuthRequest({
-    action: 'login',
-    username: username,
-    password: password,
-    address: address
-  }, (err, res) => {
-    if (err) {
-      return callback(new Error('Kan geen verbinding maken met authenticatieserver: ' + err.message));
-    }
-
-    if (res.status === 'success') {
-      callback(null, res.session_token);
-    } else {
-      callback(new Error(res.message || 'Ongeldige auth server respons'));
-    }
-  }, authHost, authPort);
+function lookup(tok, target, host, port, cb) {
+  sendAuth({action: 'lookup', session_token: tok, target}, (e, res) => {
+    if (e) return cb(e);
+    if (res.status === 'success') cb(null, res.address);
+    else cb(new Error(res.message || 'Lookup failed'));
+  }, host, port);
 }
 
-/**
- * Zoekt de I2P bestemming of IP-locatie van een online peer op.
- */
-function lookup(sessionToken, targetUsername, authHost, authPort, callback) {
-  sendAuthRequest({
-    action: 'lookup',
-    session_token: sessionToken,
-    target: targetUsername
-  }, (err, res) => {
-    if (err) {
-      return callback(err);
+function connSocks5(host, port, thost, tport, cb) {
+  const sock = net.connect({host, port}, () => sock.write(Buffer.from([0x05, 0x01, 0x00])));
+  let state = 'GREET', buf = Buffer.alloc(0);
+  sock.on('data', data => {
+    buf = Buffer.concat([buf, data]);
+    if (state === 'GREET') {
+      if (buf.length < 2) return;
+      if (buf[0] !== 0x05 || buf[1] !== 0x00) {sock.destroy(); cb(new Error('SOCKS5 init failed')); return;}
+      buf = buf.slice(2);
+      const hb = Buffer.from(thost), req = Buffer.alloc(4 + 1 + hb.length + 2);
+      req[0] = 0x05; req[1] = 0x01; req[2] = 0x00; req[3] = 0x03; req[4] = hb.length;
+      hb.copy(req, 5);
+      req.writeUInt16BE(tport, 5 + hb.length);
+      state = 'CONN';
+      sock.write(req);
+    } else if (state === 'CONN') {
+      if (buf.length < 10) return;
+      if (buf[0] !== 0x05 || buf[1] !== 0x00) {sock.destroy(); cb(new Error('SOCKS5 conn failed')); return;}
+      buf = buf.slice(10);
+      sock.removeAllListeners('data');
+      if (buf.length > 0) sock.unshift(buf);
+      cb(null, sock);
     }
-
-    if (res.status === 'success') {
-      callback(null, res.address);
-    } else {
-      callback(new Error(res.message || 'Lookup mislukt'));
-    }
-  }, authHost, authPort);
+  });
+  sock.on('error', e => cb(e));
 }
 
-/**
- * Native SOCKS5 client om anoniem te verbinden via de I2P SOCKS5 proxy.
- */
-function connectSocks5(socksHost, socksPort, targetHost, targetPort, callback) {
-  const socket = net.connect({ host: socksHost, port: socksPort }, () => {
-    // Stuur SOCKS5 begroeting (geen authenticatie)
-    socket.write(Buffer.from([0x05, 0x01, 0x00]));
-  });
-
-  let state = 'WAITING_GREETING';
-  let buffer = Buffer.alloc(0);
-
-  socket.on('data', data => {
-    buffer = Buffer.concat([buffer, data]);
-
-    if (state === 'WAITING_GREETING') {
-      if (buffer.length < 2) return;
-      const ver = buffer[0];
-      const method = buffer[1];
-      buffer = buffer.slice(2);
-
-      if (ver !== 0x05 || method !== 0x00) {
-        socket.destroy();
-        callback(new Error('SOCKS5 initialisatie mislukt.'));
-        return;
-      }
-
-      // Stuur verbindingsverzoek naar I2P Destination (Domain Type 0x03)
-      const hostBuf = Buffer.from(targetHost);
-      const req = Buffer.alloc(4 + 1 + hostBuf.length + 2);
-      req[0] = 0x05; // SOCKS5
-      req[1] = 0x01; // CONNECT
-      req[2] = 0x00; // Gereserveerd
-      req[3] = 0x03; // Domeinnaam
-      req[4] = hostBuf.length;
-      hostBuf.copy(req, 5);
-      req.writeUInt16BE(targetPort, 5 + hostBuf.length);
-
-      state = 'WAITING_CONNECT';
-      socket.write(req);
-    } else if (state === 'WAITING_CONNECT') {
-      if (buffer.length < 10) return;
-      const ver = buffer[0];
-      const rep = buffer[1];
-      buffer = buffer.slice(10); // consummeer SOCKS5 antwoord
-
-      if (ver !== 0x05 || rep !== 0x00) {
-        socket.destroy();
-        callback(new Error('SOCKS5 tunnel mislukt met code: ' + rep));
-        return;
-      }
-
-      // SOCKS5 tunnel is tot stand gebracht!
-      socket.removeAllListeners('data');
-      if (buffer.length > 0) {
-        socket.unshift(buffer);
-      }
-      callback(null, socket);
-    }
-  });
-
-  socket.on('error', err => {
-    callback(err);
-  });
-}
-
-/**
- * Maakt een anonieme I2P SAM Bridge tunnel en geeft ons Base32 adres terug.
- */
-function createSamSession(myPort, callback) {
-  const sam = net.connect({ host: I2P_CONFIG.samHost, port: I2P_CONFIG.samPort }, () => {
-    sam.write('HELLO VERSION MIN=3.0 MAX=3.1\n');
-  });
-
-  let state = 'HELLO';
-  let buffer = Buffer.alloc(0);
-  let sessionID = 'p2psession-' + crypto.randomBytes(4).toString('hex');
-  let base32Address = null;
-
+function mkSam(myPort, cb) {
+  const sam = net.connect({host: I2P.samHost, port: I2P.samPort}, () => sam.write('HELLO VERSION MIN=3.0 MAX=3.1\n'));
+  let state = 'HELLO', buf = Buffer.alloc(0), sid = 'p2p-' + crypto.randomBytes(4).toString('hex'), b32 = null;
   sam.on('data', data => {
-    buffer = Buffer.concat([buffer, data]);
-    const nl = buffer.indexOf(10);
+    buf = Buffer.concat([buf, data]);
+    const nl = buf.indexOf(10);
     if (nl === -1) return;
-
-    const line = buffer.slice(0, nl).toString().trim();
-    buffer = buffer.slice(nl + 1);
-
+    const ln = buf.slice(0, nl).toString().trim();
+    buf = buf.slice(nl + 1);
     if (state === 'HELLO') {
-      if (line.includes('RESULT=OK')) {
-        state = 'SESSION_CREATE';
-        sam.write(`SESSION CREATE STYLE=STREAM DESTINATION=TRANSIENT ID=${sessionID}\n`);
-      } else {
-        sam.destroy();
-        callback(new Error('SAM Bridge handdruk mislukt.'));
-      }
-    } else if (state === 'SESSION_CREATE') {
-      if (line.includes('RESULT=OK')) {
-        state = 'NAMELOOKUP';
-        sam.write('NAMING LOOKUP NAME=ME\n');
-      } else {
-        sam.destroy();
-        callback(new Error('Kan geen I2P-sessie aanmaken.'));
-      }
-    } else if (state === 'NAMELOOKUP') {
-      if (line.includes('RESULT=OK')) {
-        const parts = line.split(' ');
-        const valuePart = parts.find(p => p.startsWith('VALUE='));
-        if (valuePart) {
-          base32Address = valuePart.substring(6);
-          // SAM verbinding openhouden voor de sessie-instandhouding!
-          callback(null, sessionID, base32Address, sam);
-        } else {
-          sam.destroy();
-          callback(new Error('Geen Base32 adres ontvangen.'));
-        }
-      } else {
-        sam.destroy();
-        callback(new Error('SAM lookup mislukt.'));
-      }
+      if (ln.includes('RESULT=OK')) {state = 'SESSION'; sam.write(`SESSION CREATE STYLE=STREAM DESTINATION=TRANSIENT ID=${sid}\n`);}
+      else {sam.destroy(); cb(new Error('SAM handshake failed'));}
+    } else if (state === 'SESSION') {
+      if (ln.includes('RESULT=OK')) {state = 'LOOKUP'; sam.write('NAMING LOOKUP NAME=ME\n');}
+      else {sam.destroy(); cb(new Error('SAM session create failed'));}
+    } else if (state === 'LOOKUP') {
+      if (ln.includes('RESULT=OK')) {
+        const p = ln.split(' '), vp = p.find(x => x.startsWith('VALUE='));
+        if (vp) {b32 = vp.substring(6); cb(null, sid, b32, sam);}
+        else {sam.destroy(); cb(new Error('No B32 addr'));}
+      } else {sam.destroy(); cb(new Error('SAM lookup failed'));}
     }
   });
-
-  sam.on('error', err => {
-    callback(new Error('Fout bij verbinding met I2P SAM Bridge: ' + err.message));
-  });
+  sam.on('error', e => cb(new Error('SAM conn error')));
 }
 
-/**
- * Start de ontvanger node. Kan direct luisteren op TCP of via de I2P SAM Bridge.
- */
-function startReceiver(myUsername, sessionToken, myPort, authHost, authPort, base32Address, samSessionID, isMulti = false, onIncomingTransfer = null) {
-  // Functie die inkomende P2P sockets afhandelt (ongeacht TCP of I2P)
-  function behandelP2PVerbinding(socket) {
-    console.log('\n[P2P Ontvanger] Inkomende P2P-verbinding geaccepteerd.');
-    
-    let transferDone = false;
-
-    // Direct foutafhandeling registreren om uncaught exception crashes te voorkomen
-    socket.on('error', err => {
-      if (transferDone && (err.code === 'ECONNRESET' || err.code === 'EPIPE')) {
-        return; // Ignore normal socket teardown errors after completion
-      }
-      console.error('[P2P Ontvanger] Socketfout:', err.message);
-    });
-
-    socket.pause();
-
-    // Beveiliging: Voorkom hangende connecties (Slowloris/inactiviteit)
-    const timeoutVal = process.env.SOCKET_TIMEOUT ? parseInt(process.env.SOCKET_TIMEOUT, 10) : 30000;
-    socket.setTimeout(timeoutVal);
-    socket.on('timeout', () => {
-      console.error('[P2P Ontvanger] Connectie gesloten wegens inactiviteit (timeout).');
-      socket.destroy();
-      cleanup();
-    });
-
-    let buffer = Buffer.alloc(0);
-    let state = 'WAITING_HANDSHAKE';
-    let sessionKey = null;
-    let fileInfo = null;
-    let expectedSha256 = null;
-    let tempPath = null;
-    let writeStream = null;
-    let receivedBytes = 0;
-    let privateKey = null;
-    let publicKey = null;
-    const hashSum = crypto.createHash('sha256');
-
-    // Genereer lokaal een EPHEMERAL RSA-2048 sleutelpaar per verbinding asynchroon (Perfect Forward Secrecy)
-    crypto.generateKeyPair('rsa', {
-      modulusLength: 2048,
-      publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
-      privateKeyEncoding: { type: 'pkcs1', format: 'pem' }
-    }, (err, pubK, privK) => {
-      if (err) {
-        console.error('[P2P Ontvanger] Fout bij genereren ephemeral sleutels:', err.message);
-        socket.destroy();
-        return;
-      }
-      publicKey = pubK;
-      privateKey = privK;
-
-      // Stuur direct de openbare RSA-sleutel naar de verzender
-      socket.write(publicKey);
-      socket.resume();
-
-      socket.on('data', dataBlok => {
-        // Beveiliging: Voorkom bufferuitputting / RAM-aanval
-        if (state === 'WAITING_HANDSHAKE' && buffer.length + dataBlok.length > 4096) {
-          console.error('[P2P Ontvanger] Handshake buffer limiet (4KB) overschreden. Connectie afgebroken.');
-          socket.end('FOUT: Handshake buffer limiet overschreden\n');
-          return;
-        }
-
-        // Beveiliging: Voorkom bufferuitputting / memory exhaustion tijdens streaming (max 256KB in queue)
-        if (buffer.length + dataBlok.length > 256 * 1024) {
-          console.error('[P2P Ontvanger] Streaming buffer limiet (256KB) overschreden. Connectie afgebroken.');
-          socket.destroy();
-          return;
-        }
-
-        buffer = Buffer.concat([buffer, dataBlok]);
-
-        if (state === 'WAITING_HANDSHAKE') {
-          // Handshake packet structuur:
-          // [4 bytes env1Len] + [4 bytes metadataLen] + [env1] + [12 bytes nonce] + [16 bytes tag] + [encrypted metadata]
-          if (buffer.length < 8) return;
-
-          const env1Len = buffer.readUInt32BE(0);
-          const metadataLen = buffer.readUInt32BE(4);
-
-          // Beveiliging: Sanity check op de envelop- en metadatalengte om hackers direct te blokkeren
-          if (env1Len !== 256 || metadataLen <= 0 || metadataLen > 1024) {
-            console.error('[P2P Ontvanger] Ongeldige handshake header parameters gedetecteerd. Connectie direct verbroken.');
-            socket.destroy();
-            return;
-          }
-
-          const packetSize = 8 + env1Len + 12 + 16 + metadataLen;
-
-          if (buffer.length < packetSize) return;
-
-          const envelope1 = buffer.slice(8, 8 + env1Len);
-          const nonce = buffer.slice(8 + env1Len, 8 + env1Len + 12);
-          const tag = buffer.slice(8 + env1Len + 12, 8 + env1Len + 28);
-          const ciphertext = buffer.slice(8 + env1Len + 28, packetSize);
-
-          // Haal restant uit buffer
-          buffer = buffer.slice(packetSize);
-
-          // 1. Decrypt 1e envelop om ChaCha20-Poly1305 sleutel te herstellen
+function startRecv(u, tok, port, host, rport, b32, sid, mult = false, onInc = null) {
+  function handle(sock) {
+    log('[Recv] Inbound P2P conn accepted.');
+    let done = false;
+    sock.on('error', e => {if (done && (e.code === 'ECONNRESET' || e.code === 'EPIPE')) return;});
+    sock.pause();
+    const tval = process.env.SOCKET_TIMEOUT ? parseInt(process.env.SOCKET_TIMEOUT, 10) : 30000;
+    sock.setTimeout(tval);
+    sock.on('timeout', () => {log('[Recv] Timeout'); sock.destroy(); cleanup();});
+    let buf = Buffer.alloc(0), state = 'SHAKE', skey = null, finfo = null, sha = null, tmp = null, ws = null, got = 0, priv = null, pub = null;
+    const hsum = crypto.createHash('sha256');
+    crypto.generateKeyPair('rsa', {modulusLength: 2048, publicKeyEncoding: {type: 'pkcs1', format: 'pem'}, 
+      privateKeyEncoding: {type: 'pkcs1', format: 'pem'}}, (e, pubK, privK) => {
+      if (e) {log('[Recv] RSA gen error'); sock.destroy(); return;}
+      pub = pubK; priv = privK;
+      sock.write(pub);
+      sock.resume();
+      sock.on('data', blk => {
+        if (state === 'SHAKE' && buf.length + blk.length > 4096) {log('[Recv] Handshake buf limit'); sock.end('ERR\n'); return;}
+        if (buf.length + blk.length > 256 * 1024) {log('[Recv] Stream buf limit'); sock.destroy(); return;}
+        buf = Buffer.concat([buf, blk]);
+        if (state === 'SHAKE') {
+          if (buf.length < 8) return;
+          const e1Len = buf.readUInt32BE(0), mLen = buf.readUInt32BE(4);
+          if (e1Len !== 256 || mLen <= 0 || mLen > 1024) {log('[Recv] Invalid handshake'); sock.destroy(); return;}
+          const pSize = 8 + e1Len + 12 + 16 + mLen;
+          if (buf.length < pSize) return;
+          const env1 = buf.slice(8, 8 + e1Len), nonce = buf.slice(8 + e1Len, 8 + e1Len + 12), 
+            tag = buf.slice(8 + e1Len + 12, 8 + e1Len + 28), cipher = buf.slice(8 + e1Len + 28, pSize);
+          buf = buf.slice(pSize);
           try {
-            sessionKey = crypto.privateDecrypt({
-              key: privateKey,
-              padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-              oaepHash: 'sha256'
-            }, envelope1);
-
-            if (sessionKey.length !== 32) throw new Error('Foutieve symmetrische sleutellengte');
-          } catch (err) {
-            console.error('[P2P Ontvanger] Decryptie van 1e envelop mislukt:', err.message);
-            socket.end('FOUT: RSA decodering mislukt\n');
-            return;
-          }
-
-          // 2. Decrypt de metadata handshake met ChaCha20-Poly1305
+            skey = crypto.privateDecrypt({key: priv, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256'}, env1);
+            if (skey.length !== 32) throw new Error('Bad key len');
+          } catch (e) {log('[Recv] Decrypt env1 failed'); sock.end('ERR\n'); return;}
           try {
-            const decipher = crypto.createDecipheriv('chacha20-poly1305', sessionKey, nonce, { authTagLength: 16 });
-            decipher.setAuthTag(tag);
-            const decryptedMetadata = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-
-            fileInfo = JSON.parse(decryptedMetadata.toString());
-          } catch (err) {
-            console.error('[P2P Ontvanger] Decryptie van metadata handshake mislukt:', err.message);
-            socket.end('FOUT: Metadata handdruk corrupt\n');
-            return;
+            const dec = crypto.createDecipheriv('chacha20-poly1305', skey, nonce, {authTagLength: 16});
+            dec.setAuthTag(tag);
+            const meta = Buffer.concat([dec.update(cipher), dec.final()]);
+            finfo = JSON.parse(meta.toString());
+          } catch (e) {log('[Recv] Decrypt meta failed'); sock.end('ERR\n'); return;}
+          if (!finfo.username || !finfo.filename || !finfo.file_size || !finfo.session_token) {sock.end('ERR\n'); return;}
+          if (!Number.isInteger(finfo.file_size) || finfo.file_size <= 0) {log('[Recv] Bad file size'); sock.end('ERR\n'); return;}
+          const vname = path.basename(finfo.filename);
+          if (vname !== finfo.filename || vname.includes('..') || finfo.filename.includes('/') || finfo.filename.includes('\\') || !/^[a-zA-Z0-9_\-\. ]+$/.test(vname)) {
+            log('[Recv] Unsafe name'); sock.end('ERR\n'); return;
           }
-
-          if (!fileInfo.username || !fileInfo.filename || !fileInfo.file_size || !fileInfo.session_token) {
-            socket.end('FOUT: Incomplete metadata\n');
-            return;
-          }
-
-          // Beveiliging: file_size parameter validatie (positive integer)
-          if (!Number.isInteger(fileInfo.file_size) || fileInfo.file_size <= 0) {
-            console.error(`[P2P Ontvanger] Ongeldige bestandsgrootte gedetecteerd: ${fileInfo.file_size}`);
-            socket.end('FOUT: Ongeldige bestandsgrootte\n');
-            return;
-          }
-
-          // Beveiliging: Strict bestandsnaam validatie (directory traversal & Alternate Data Streams)
-          const veiligeNaam = path.basename(fileInfo.filename);
-          if (veiligeNaam !== fileInfo.filename || veiligeNaam.includes('..') ||
-            fileInfo.filename.includes('/') || fileInfo.filename.includes('\\') ||
-            !/^[a-zA-Z0-9_\-\. ]+$/.test(veiligeNaam)) {
-            console.error(`[P2P Ontvanger] Onveilige bestandsnaam gedetecteerd: ${fileInfo.filename}`);
-            socket.end('FOUT: Onveilige bestandsnaam. Alleen letters, cijfers, underscores (_), streepjes (-), punten (.) en spaties zijn toegestaan.\n');
-            return;
-          }
-
-          // Asynchroon de afzender verifiëren bij de centrale server (Pre-Approval Sender Verification)
-          socket.pause();
-          console.log(`[P2P Ontvanger] Afzender '${fileInfo.username}' aan het verifiëren via auth server...`);
-          sendAuthRequest({
-            action: 'verify_session',
-            session_token: fileInfo.session_token,
-            username: fileInfo.username
-          }, (verifyErr, verifyRes) => {
-            if (verifyErr) {
-              console.error(`[P2P Ontvanger] Fout bij verbinden met auth server voor verificatie:`, verifyErr.message);
-              socket.resume();
-              socket.end('FOUT: Kan afzender niet verifiëren (verbindingsfout)\n');
-              cleanup();
-              return;
-            }
-
-            if (!verifyRes || verifyRes.status !== 'success') {
-              console.error(`[P2P Ontvanger] Afzender verificatie mislukt voor '${fileInfo.username}':`, verifyRes ? verifyRes.message : 'Geen response');
-              socket.resume();
-              socket.end('FOUT: Afzender verificatie mislukt\n');
-              cleanup();
-              return;
-            }
-
-            console.log(`[P2P Ontvanger] Afzender '${fileInfo.username}' succesvol geverifieerd. Vraag toestemming via UI...`);
-
-            // Beveiliging: Vraag toestemming via callback (UI) of via console
-            const isAutoAccept = process.env.AUTO_ACCEPT === 'true';
-
-            // Helper: schrijf het bestand en start ontvangst
+          sock.pause();
+          log(`[Recv] Verify sender '${finfo.username}'...`);
+          sendAuth({action: 'verify_session', session_token: finfo.session_token, username: finfo.username}, (vErr, vRes) => {
+            if (vErr || !vRes || vRes.status !== 'success') {log('[Recv] Verify failed'); sock.resume(); sock.end('ERR\n'); cleanup(); return;}
+            log(`[Recv] Sender verified.`);
+            const isAuto = process.env.AUTO_ACCEPT === 'true';
             function doAccept() {
-              console.log('[P2P Ontvanger] Overdracht geaccepteerd. Start download...');
-              const ontvangMap = getCurrentUserReceivedDir();
-              fs.mkdirSync(ontvangMap, { recursive: true });
-              tempPath = path.join(ontvangMap, veiligeNaam + '.tmp');
-
-              try {
-                writeStream = fs.createWriteStream(tempPath);
-                writeStream.on('error', err => {
-                  console.error('[P2P Ontvanger] Bestandsfout:', err.message);
-                  socket.end('FOUT: Server schrijf error\n');
-                  cleanup();
-                });
-              } catch (e) {
-                console.error('[P2P Ontvanger] Fout bij aanmaken schrijfstroom:', e.message);
-                socket.end('FOUT: Server schrijf error\n');
-                cleanup();
-                return;
-              }
-
-              state = 'WAITING_ENVELOPE_2';
-              socket.resume();
-              socket.write('ACCEPT\n');
+              log('[Recv] Accepted.');
+              const od = getCurDir();
+              fs.mkdirSync(od, {recursive: true});
+              tmp = path.join(od, vname + '.tmp');
+              try {ws = fs.createWriteStream(tmp);
+                ws.on('error', e => {log('[Recv] Write error'); sock.end('ERR\n'); cleanup();});
+              } catch (e) {sock.end('ERR\n'); cleanup(); return;}
+              state = 'ENV2';
+              sock.resume();
+              sock.write('ACCEPT\n');
             }
-
-            function doDecline() {
-              console.log('[P2P Ontvanger] Overdracht geweigerd.');
-              socket.resume();
-              socket.write('DECLINE: Geweigerd door ontvanger\n');
-              socket.destroy();
-              cleanup();
-            }
-
-            if (isAutoAccept) {
-              console.log('[P2P Ontvanger] AUTO_ACCEPT actief. Overdracht automatisch geaccepteerd.');
-              doAccept();
-            } else if (typeof onIncomingTransfer === 'function') {
-              // UI-modus: geef controle aan de Web UI callback. Socket blijft gepauzeerd tot doAccept/doDecline.
-              console.log(`[P2P Ontvanger] Wachten op UI-beslissing voor '${veiligeNaam}'...`);
-              onIncomingTransfer(
-                { username: fileInfo.username, filename: veiligeNaam, file_size: fileInfo.file_size },
-                doAccept,
-                doDecline
-              );
-            } else {
-              // Geen callback en geen AUTO_ACCEPT: automatisch weigeren
-              console.log('[P2P Ontvanger] Geen UI callback beschikbaar. Transfer geweigerd.');
-              doDecline();
-            }
-          }, authHost || AUTH_HOST, authPort || AUTH_PORT_UI);
-
-        } else {
-          processPayload();
-        }
+            function doDecline() {log('[Recv] Declined.'); sock.resume(); sock.write('DECLINE\n'); sock.destroy(); cleanup();}
+            if (isAuto) doAccept();
+            else if (typeof onInc === 'function') onInc({username: finfo.username, filename: vname, file_size: finfo.file_size}, doAccept, doDecline);
+            else doDecline();
+          }, host || HOST, rport || PORT);
+        } else process();
       });
     });
 
-    function processPayload() {
-      if (state === 'WAITING_ENVELOPE_2') {
-        if (buffer.length < 4) return;
-        const envLen = buffer.readUInt32BE(0);
-        if (buffer.length < 4 + envLen) return;
-
-        const envelope2Bin = buffer.slice(4, 4 + envLen);
-        buffer = buffer.slice(4 + envLen);
-
-        // Decrypt 2e envelop met onze RSA Private Key
+    function process() {
+      if (state === 'ENV2') {
+        if (buf.length < 4) return;
+        const elen = buf.readUInt32BE(0);
+        if (buf.length < 4 + elen) return;
+        const env2 = buf.slice(4, 4 + elen);
+        buf = buf.slice(4 + elen);
         try {
-          const decryptedEnv = crypto.privateDecrypt({
-            key: privateKey,
-            padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-            oaepHash: 'sha256'
-          }, envelope2Bin);
-
-          const envData = JSON.parse(decryptedEnv.toString());
-          expectedSha256 = envData.sha256;
-          console.log(`[P2P Ontvanger] 2e Envelop ontsleuteld. Verwachte hash: ${expectedSha256}`);
-
-          state = 'STREAMING';
-          processPayload(); // verwerk eventuele overige data in buffer
-        } catch (err) {
-          console.error('[P2P Ontvanger] Decryptie van 2e envelop mislukt:', err.message);
-          socket.end('FOUT: 2e envelop corrupt\n');
-          cleanup();
-          return;
-        }
+          const dec = crypto.privateDecrypt({key: priv, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256'}, env2);
+          const ed = JSON.parse(dec.toString());
+          sha = ed.sha256;
+          state = 'STREAM';
+          process();
+        } catch (e) {log('[Recv] Env2 decrypt failed'); sock.end('ERR\n'); cleanup(); return;}
       }
-
-      if (state === 'STREAMING') {
-        const CHUNK_SIZE = 65536;
-        const remaining = fileInfo.file_size - receivedBytes;
-        if (remaining <= 0) return;
-
-        const currentChunk = Math.min(CHUNK_SIZE, remaining);
-        const packetSize = 12 + currentChunk + 16; // nonce + ciphertext + tag
-
-        while (buffer.length >= packetSize) {
-          const packet = buffer.slice(0, packetSize);
-          buffer = buffer.slice(packetSize);
-
-          const nonce = packet.slice(0, 12);
-          const ciphertext = packet.slice(12, 12 + currentChunk);
-          const tag = packet.slice(12 + currentChunk, packetSize);
-
+      if (state === 'STREAM') {
+        const CSIZE = 65536, rem = finfo.file_size - got;
+        if (rem <= 0) return;
+        const cchunk = Math.min(CSIZE, rem), psize = 12 + cchunk + 16;
+        while (buf.length >= psize) {
+          const pkt = buf.slice(0, psize);
+          buf = buf.slice(psize);
+          const nonce = pkt.slice(0, 12), ct = pkt.slice(12, 12 + cchunk), tag = pkt.slice(12 + cchunk, psize);
           try {
-            const decipher = crypto.createDecipheriv('chacha20-poly1305', sessionKey, nonce, { authTagLength: 16 });
-            decipher.setAuthTag(tag);
-            const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-
-            writeStream.write(plaintext);
-            hashSum.update(plaintext);
-            receivedBytes += currentChunk;
-          } catch (err) {
-            console.error('[P2P Ontvanger] Poly1305 MAC verificatie mislukt! Data is corrupt.');
-            socket.write('FOUT: Integriteitsfout tijdens streaming.\n');
-            socket.destroy();
-            cleanup();
-            return;
-          }
-
-          const nextRemaining = fileInfo.file_size - receivedBytes;
-          if (nextRemaining <= 0) {
-            writeStream.end(() => {
-              const finalPath = path.join(path.dirname(tempPath), fileInfo.filename);
-              const calculatedSha256 = hashSum.digest('hex');
-
-              if (calculatedSha256 !== expectedSha256) {
-                console.error('[P2P Ontvanger] SHA-256 integriteitscontrole mislukt!');
-                socket.end('FOUT: SHA-256 hash mismatch.\n');
-                cleanup();
-              } else {
-                fs.renameSync(tempPath, finalPath);
-                console.log(`[P2P Ontvanger] Bestand succesvol opgeslagen: ${fileInfo.filename}`);
-                webState.hasNewFiles = true;
-
-                for (const [tid, tr] of Object.entries(webState.activeTransfers.receives || {})) {
-                  if (tr.filename === fileInfo.filename && tr.sender === fileInfo.username) {
-                    tr.status = 'complete';
-                    tr.received = fileInfo.file_size;
-                    setTimeout(() => delete webState.activeTransfers.receives[tid], 10000);
-                    break;
-                  }
-                }
-
-                transferDone = true;
-                socket.end(`OK geupload: ${fileInfo.filename}\n`);
-                if (isMulti) {
-                  process.stdout.write('\n> ');
-                }
+            const dec = crypto.createDecipheriv('chacha20-poly1305', skey, nonce, {authTagLength: 16});
+            dec.setAuthTag(tag);
+            const pt = Buffer.concat([dec.update(ct), dec.final()]);
+            ws.write(pt);
+            hsum.update(pt);
+            got += cchunk;
+          } catch (e) {log('[Recv] MAC verify failed'); sock.write('ERR\n'); sock.destroy(); cleanup(); return;}
+          const nrem = finfo.file_size - got;
+          if (nrem <= 0) {
+            ws.end(() => {
+              const fp = path.join(path.dirname(tmp), finfo.filename), csha = hsum.digest('hex');
+              if (csha !== sha) {log('[Recv] SHA-256 mismatch'); sock.end('ERR\n'); cleanup();}
+              else {
+                fs.renameSync(tmp, fp);
+                log(`[Recv] Saved: ${finfo.filename}`);
+                done = true;
+                sock.end(`OK\n`);
               }
             });
             break;
@@ -837,1005 +402,403 @@ function startReceiver(myUsername, sessionToken, myPort, authHost, authPort, bas
       }
     }
 
-    function cleanup() {
-      transferDone = true;
-      if (writeStream) writeStream.destroy();
-      if (tempPath && fs.existsSync(tempPath)) {
-        try { fs.unlinkSync(tempPath); } catch (e) { }
-      }
-    }
+    function cleanup() {done = true; if (ws) ws.destroy(); if (tmp && fs.existsSync(tmp)) {try {fs.unlinkSync(tmp);} catch (e) {}}}
   }
 
-  // Luister via I2P SAM Bridge
-  function startSamAcceptLoop() {
-    const samAccept = net.connect({ host: I2P_CONFIG.samHost, port: I2P_CONFIG.samPort }, () => {
-      samAccept.write('HELLO VERSION MIN=3.0 MAX=3.1\n');
-    });
-
-    let subState = 'HELLO';
-    let subBuffer = Buffer.alloc(0);
-
-    samAccept.on('error', err => {
-      console.error('[P2P Ontvanger] I2P accept socket fout:', err.message);
-    });
-
-    samAccept.on('data', data => {
-      subBuffer = Buffer.concat([subBuffer, data]);
-
+  function startSamLoop() {
+    const samA = net.connect({host: I2P.samHost, port: I2P.samPort}, () => samA.write('HELLO VERSION MIN=3.0 MAX=3.1\n'));
+    let subState = 'HELLO', subBuf = Buffer.alloc(0);
+    samA.on('error', e => log('[Recv] SAM error'));
+    samA.on('data', data => {
+      subBuf = Buffer.concat([subBuf, data]);
       while (true) {
-        const nl = subBuffer.indexOf(10);
+        const nl = subBuf.indexOf(10);
         if (nl === -1) break;
-        const line = subBuffer.slice(0, nl).toString().trim();
-        subBuffer = subBuffer.slice(nl + 1);
-
+        const ln = subBuf.slice(0, nl).toString().trim();
+        subBuf = subBuf.slice(nl + 1);
         if (subState === 'HELLO') {
-          if (line.includes('RESULT=OK')) {
-            subState = 'STREAM_STATUS';
-            samAccept.write(`STREAM ACCEPT ID=${samSessionID}\n`);
-          } else {
-            console.error('[P2P Ontvanger] I2P HELLO mislukt:', line);
-            samAccept.destroy();
-            break;
-          }
-        } else if (subState === 'STREAM_STATUS') {
-          if (line.includes('RESULT=OK')) {
-            subState = 'PEER_CONNECTION';
-            // Tunnel luistert nu. We wachten tot de peer verbinding maakt.
-          } else {
-            console.error('[P2P Ontvanger] I2P Accept status mislukt:', line);
-            samAccept.destroy();
-            break;
-          }
-        } else if (subState === 'PEER_CONNECTION') {
-          console.log('[P2P Ontvanger] I2P SAM tunnel peer verbonden. Handshake starten...');
-
-          // Deze socket is nu verbonden met de client!
-          samAccept.removeAllListeners('data');
-          samAccept.removeAllListeners('error');
-          if (subBuffer.length > 0) {
-            samAccept.unshift(subBuffer);
-          }
-          behandelP2PVerbinding(samAccept);
-
-          // Start direct de volgende accept socket om meer verbindingen op te vangen
-          startSamAcceptLoop();
+          if (ln.includes('RESULT=OK')) {subState = 'STATUS'; samA.write(`STREAM ACCEPT ID=${sid}\n`);}
+          else {samA.destroy(); break;}
+        } else if (subState === 'STATUS') {
+          if (ln.includes('RESULT=OK')) subState = 'PEER';
+          else {samA.destroy(); break;}
+        } else if (subState === 'PEER') {
+          log('[Recv] SAM peer connected.');
+          samA.removeAllListeners('data');
+          samA.removeAllListeners('error');
+          if (subBuf.length > 0) samA.unshift(subBuf);
+          handle(samA);
+          startSamLoop();
           break;
         }
       }
     });
   }
 
-  startSamAcceptLoop();
-  console.log(`P2P Node is online als '${myUsername}' op I2P.`);
-  console.log(`I2P Destination: ${base32Address}`);
+  startSamLoop();
+  log(`P2P online as '${u}' on I2P. Addr: ${b32}`);
 }
 
-/**
- * Maakt verbinding met een peer en verzendt een bestand.
- */
-function performSendFlow(file, targetUsername, myUsername, sessionToken, authHost, authPort, callback) {
-  let finalized = false;
-  const finalize = (err = null) => {
-    if (finalized) return;
-    finalized = true;
-    if (callback) callback(err);
-  };
-
-  if (!fs.existsSync(file)) {
-    console.error(`Fout: Bestand '${file}' bestaat niet.`);
-    finalize(new Error('Bestand bestaat niet'));
-    return;
-  }
-  const fileData = fs.readFileSync(file);
-  const filename = path.basename(file);
-
-  console.log(`[P2P Verzender] Vraag adres op van '${targetUsername}'...`);
-  lookup(sessionToken, targetUsername, authHost, authPort, (err, targetAddress) => {
-    if (err) {
-      console.error(`[P2P Verzender] Lookup mislukt:`, err.message);
-      finalize(err);
-      return;
-    }
-
-    let verbindingKlaar = (peerSocket) => {
-      console.log(`[P2P Verzender] Verbonden met peer '${targetUsername}'. Wachten op RSA sleutel...`);
-
-      const timeoutVal = process.env.SOCKET_TIMEOUT ? parseInt(process.env.SOCKET_TIMEOUT, 10) : 30000;
-      peerSocket.setTimeout(timeoutVal);
-      peerSocket.on('timeout', () => {
-        console.error('[P2P Verzender] Verbinding gesloten wegens time-out.');
-        peerSocket.destroy();
-        finalize(new Error('Verbinding time-out'));
-      });
-
-      peerSocket.on('error', (socketErr) => {
-        if (finalized && (socketErr.code === 'ECONNRESET' || socketErr.code === 'EPIPE')) {
-          return; // Ignore normal socket teardown errors after completion
-        }
-        console.error('[P2P Verzender] Socketfout:', socketErr.message);
-        finalize(socketErr);
-      });
-
-      let peerBuffer = Buffer.alloc(0);
-      let peerPublicKey = null;
-      let state = 'WAITING_RSA';
-      let sessionKey = null;
-      let gotFinalAck = false;
-      let sentAllChunks = false;
-      let gotFailureReply = false;
-
-      peerSocket.on('close', () => {
-        if (state === 'STREAMING' && (gotFinalAck || (sentAllChunks && !gotFailureReply))) {
-          finalize(null);
-          return;
-        }
-        if (!finalized) {
-          finalize(new Error('Verbinding met peer voortijdig gesloten'));
-        }
-      });
-
-      peerSocket.on('data', dataBlok => {
-        // Beveiliging: Limiteer buffer accumulatie in de client om DoS te voorkomen
-        if (peerBuffer.length + dataBlok.length > 4096) {
-          console.error('[P2P Verzender] Buffer limiet (4KB) overschreden. Connectie verbroken.');
-          peerSocket.destroy();
-          finalize(new Error('Buffer limiet overschreden'));
-          return;
-        }
-        peerBuffer = Buffer.concat([peerBuffer, dataBlok]);
-
-        if (state === 'WAITING_RSA') {
-          const delimiter = '-----END RSA PUBLIC KEY-----';
-          const delimiterIndex = peerBuffer.indexOf(delimiter);
-          if (delimiterIndex === -1) return;
-
-          const nlIndex = peerBuffer.indexOf('\n', delimiterIndex);
-          if (nlIndex === -1) return;
-
-          // Extraheer de RSA Public Key van de ontvanger (inclusief newline)
-          peerPublicKey = peerBuffer.slice(0, nlIndex + 1).toString();
-          peerBuffer = peerBuffer.slice(nlIndex + 1);
-          console.log('[P2P Verzender] RSA Public Key ontvangen van peer.');
-
-          // Genereer 32-byte symmetrische sleutel
-          sessionKey = crypto.randomBytes(32);
-
-          // Encrypt symmetrische sleutel (1e envelop)
-          const envelope1 = crypto.publicEncrypt({
-            key: peerPublicKey,
-            padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-            oaepHash: 'sha256'
-          }, sessionKey);
-
-          // Encrypt metadata met ChaCha20-Poly1305 (inclusief session_token)
-          const metadataJSON = JSON.stringify({
-            username: myUsername,
-            filename: filename,
-            file_size: fileData.length,
-            session_token: sessionToken
-          });
+function sendFile(file, tgt, myUser, token, host, port, cb) {
+  let done = false;
+  const fin = (e = null) => {if (done) return; done = true; if (cb) cb(e);};
+  if (!fs.existsSync(file)) {fin(new Error('File not found')); return;}
+  const fd = fs.readFileSync(file), fn = path.basename(file);
+  log(`[Send] Lookup '${tgt}'...`);
+  lookup(token, tgt, host, port, (e, taddr) => {
+    if (e) {fin(e); return;}
+    let connReady = (ps) => {
+      log(`[Send] Connected to '${tgt}'.`);
+      const tval = process.env.SOCKET_TIMEOUT ? parseInt(process.env.SOCKET_TIMEOUT, 10) : 30000;
+      ps.setTimeout(tval);
+      ps.on('timeout', () => {ps.destroy(); fin(new Error('Timeout'));});
+      ps.on('error', (e) => {if (done && (e.code === 'ECONNRESET' || e.code === 'EPIPE')) return; fin(e);});
+      let pbuf = Buffer.alloc(0), ppub = null, state = 'RSA', skey = null, ok = false, allSent = false, fail = false;
+      ps.on('close', () => {if (state === 'STREAM' && (ok || (allSent && !fail))) {fin(null); return;} if (!done) fin(new Error('Conn closed'));});
+      ps.on('data', blk => {
+        if (pbuf.length + blk.length > 4096) {ps.destroy(); fin(new Error('Buffer limit')); return;}
+        pbuf = Buffer.concat([pbuf, blk]);
+        if (state === 'RSA') {
+          const del = '-----END RSA PUBLIC KEY-----', didx = pbuf.indexOf(del);
+          if (didx === -1) return;
+          const nidx = pbuf.indexOf('\n', didx);
+          if (nidx === -1) return;
+          ppub = pbuf.slice(0, nidx + 1).toString();
+          pbuf = pbuf.slice(nidx + 1);
+          log('[Send] Got RSA key.');
+          skey = crypto.randomBytes(32);
+          const e1 = crypto.publicEncrypt({key: ppub, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256'}, skey);
+          const mj = JSON.stringify({username: myUser, filename: fn, file_size: fd.length, session_token: token});
           const nonce = crypto.randomBytes(12);
-          const cipher = crypto.createCipheriv('chacha20-poly1305', sessionKey, nonce, { authTagLength: 16 });
-          const ciphertext = Buffer.concat([cipher.update(Buffer.from(metadataJSON)), cipher.final()]);
-          const tag = cipher.getAuthTag();
-
-          // Verzend: [4b env1Len] + [env1] + [4b metadataLen] + [12b nonce] + [16b tag] + [ciphertext]
-          const header = Buffer.alloc(8);
-          header.writeUInt32BE(envelope1.length, 0);
-          header.writeUInt32BE(ciphertext.length, 4);
-
-          peerSocket.write(Buffer.concat([header, envelope1, nonce, tag, ciphertext]));
-          state = 'WAITING_ACCEPT';
-          console.log('[P2P Verzender] Gecodeerde metadata handshake verzonden. Wachten op acceptatie...');
-        } else if (state === 'WAITING_ACCEPT') {
-          const nl = peerBuffer.indexOf(10);
+          const c = crypto.createCipheriv('chacha20-poly1305', skey, nonce, {authTagLength: 16});
+          const ct = Buffer.concat([c.update(Buffer.from(mj)), c.final()]);
+          const tag = c.getAuthTag();
+          const hdr = Buffer.alloc(8);
+          hdr.writeUInt32BE(e1.length, 0);
+          hdr.writeUInt32BE(ct.length, 4);
+          ps.write(Buffer.concat([hdr, e1, nonce, tag, ct]));
+          state = 'ACCEPT';
+          log('[Send] Sent handshake.');
+        } else if (state === 'ACCEPT') {
+          const nl = pbuf.indexOf(10);
           if (nl === -1) return;
-
-          const line = peerBuffer.slice(0, nl).toString().trim();
-          peerBuffer = peerBuffer.slice(nl + 1);
-
-          if (line === 'ACCEPT') {
-            console.log('[P2P Verzender] Overdracht geaccepteerd! Start payload streaming...');
-            state = 'STREAMING';
-
-            const fileSha256 = crypto.createHash('sha256').update(fileData).digest('hex');
-
-            // Maak en versleutel de 2e envelop
-            const envelope2JSON = JSON.stringify({
-              session_token: sessionToken,
-              filename: filename,
-              sha256: fileSha256
-            });
-            const envelope2 = crypto.publicEncrypt({
-              key: peerPublicKey,
-              padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-              oaepHash: 'sha256'
-            }, Buffer.from(envelope2JSON));
-
-            // Stuur [4b env2Len] + [envelope2]
-            const env2LenBuf = Buffer.alloc(4);
-            env2LenBuf.writeUInt32BE(envelope2.length, 0);
-            peerSocket.write(env2LenBuf);
-            peerSocket.write(envelope2);
-
-            // Stream chunks
-            const CHUNK_SIZE = 65536;
-            let offset = 0;
-            while (offset < fileData.length) {
-              const chunk = fileData.slice(offset, offset + CHUNK_SIZE);
-              const chunkNonce = crypto.randomBytes(12);
-
-              const chunkCipher = crypto.createCipheriv('chacha20-poly1305', sessionKey, chunkNonce, { authTagLength: 16 });
-              const chunkCiphertext = Buffer.concat([chunkCipher.update(chunk), chunkCipher.final()]);
-              const chunkTag = chunkCipher.getAuthTag();
-
-              peerSocket.write(Buffer.concat([chunkNonce, chunkCiphertext, chunkTag]));
-              offset += chunk.length;
+          const ln = pbuf.slice(0, nl).toString().trim();
+          pbuf = pbuf.slice(nl + 1);
+          if (ln === 'ACCEPT') {
+            log('[Send] Accepted! Stream...');
+            state = 'STREAM';
+            const fsha = crypto.createHash('sha256').update(fd).digest('hex');
+            const e2j = JSON.stringify({session_token: token, filename: fn, sha256: fsha});
+            const e2 = crypto.publicEncrypt({key: ppub, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256'}, Buffer.from(e2j));
+            const e2lb = Buffer.alloc(4);
+            e2lb.writeUInt32BE(e2.length, 0);
+            ps.write(e2lb);
+            ps.write(e2);
+            const CSIZE = 65536;
+            let off = 0;
+            while (off < fd.length) {
+              const chunk = fd.slice(off, off + CSIZE), cn = crypto.randomBytes(12);
+              const cc = crypto.createCipheriv('chacha20-poly1305', skey, cn, {authTagLength: 16});
+              const cct = Buffer.concat([cc.update(chunk), cc.final()]);
+              const ctag = cc.getAuthTag();
+              ps.write(Buffer.concat([cn, cct, ctag]));
+              off += chunk.length;
             }
-            sentAllChunks = true;
-            peerSocket.end();
-          } else {
-            console.error('[P2P Verzender] Overdracht geweigerd:', line);
-            peerSocket.destroy();
-            finalize(new Error(`Overdracht geweigerd: ${line}`));
-          }
-        } else if (state === 'STREAMING') {
-          const nl = peerBuffer.indexOf(10);
+            allSent = true;
+            ps.end();
+          } else {ps.destroy(); fin(new Error(`Declined: ${ln}`));}
+        } else if (state === 'STREAM') {
+          const nl = pbuf.indexOf(10);
           if (nl === -1) return;
-          const line = peerBuffer.slice(0, nl).toString().trim();
-          console.log('[P2P Verzender] Peer antwoord:', line);
-          if (line.startsWith('OK')) {
-            gotFinalAck = true;
-          } else if (line.startsWith('FOUT')) {
-            gotFailureReply = true;
-            finalize(new Error(line));
-          }
-          peerSocket.destroy();
+          const ln = pbuf.slice(0, nl).toString().trim();
+          if (ln.startsWith('OK')) ok = true;
+          else if (ln.startsWith('ERR')) {fail = true; fin(new Error(ln));}
+          ps.destroy();
         }
       });
     };
-
-    console.log(`[P2P Verzender] Maak anonieme verbinding via SOCKS5 proxy naar ${targetAddress}...`);
-    connectSocks5(I2P_CONFIG.socksHost, I2P_CONFIG.socksPort, targetAddress, 80, (socksErr, peerSocket) => {
-      if (socksErr) {
-        console.error('[P2P Verzender] Kan niet verbinden via SOCKS5:', socksErr.message);
-        finalize(socksErr);
-        return;
-      }
-      verbindingKlaar(peerSocket);
+    log(`[Send] Connecting to ${taddr}...`);
+    connSocks5(I2P.socksHost, I2P.socksPort, taddr, 80, (e, ps) => {
+      if (e) {fin(e); return;}
+      connReady(ps);
     });
   });
 }
 
+let i2pProc = null;
 
-
-
-let i2pChildProcess = null;
-
-// Ruim het I2P-achtergrondproces op bij het afsluiten van Node
-function cleanupI2p() {
-  if (i2pChildProcess) {
-    console.log('[I2P Manager] Stoppen van lokale i2pd daemon...');
-    try {
-      i2pChildProcess.kill();
-    } catch (e) { }
-    i2pChildProcess = null;
+function cleanI2p() {
+  if (i2pProc) {
+    log('[I2P] Stop daemon...');
+    try {i2pProc.kill();} catch (e) {}
+    i2pProc = null;
   }
 }
 
-process.on('exit', cleanupI2p);
-process.on('SIGINT', () => {
-  cleanupI2p();
-  process.exit(0);
-});
-process.on('SIGTERM', () => {
-  cleanupI2p();
-  process.exit(0);
-});
+process.on('exit', cleanI2p);
+process.on('SIGINT', () => {cleanI2p(); process.exit(0);});
+process.on('SIGTERM', () => {cleanI2p(); process.exit(0);});
 
-function startI2pProcess(exePath, callback) {
+function strtI2p(exe, cb) {
   try {
-    i2pChildProcess = spawn(exePath, [
-      '--sam.enabled=1',
-      '--sam.port=7656',
-      '--socksproxy.enabled=1',
-      '--socksproxy.port=4447',
-      '--httpproxy.enabled=0',
-      '--http.enabled=0'
-    ], {
-      detached: true,
-      stdio: 'ignore'
-    });
-
-    i2pChildProcess.unref();
-
-    console.log('[I2P Manager] i2pd daemon gestart in achtergrond. Wachten tot SAM Bridge online komt...');
-
-    let retries = 0;
-    const maxRetries = 120; // 120 seconden wachttijd (genoeg voor UAC / admin bevoegdheid verlenen)
-
-    function checkSamOnline() {
-      const socket = net.connect({ port: 7656, host: '127.0.0.1' }, () => {
-        socket.destroy();
-        console.log('[I2P Manager] SAM Bridge is online gekomen en luistert!');
-        callback(null, i2pChildProcess);
-      });
-
-      socket.on('error', () => {
-        retries++;
-        if (retries % 5 === 0) {
-          console.log(`[I2P Manager] Wachten tot SAM Bridge online komt... (poging ${retries}/${maxRetries})`);
-        }
-        if (retries >= maxRetries) {
-          callback(new Error(`SAM Bridge startte niet op binnen de verwachte tijd (${maxRetries}s).`));
-          return;
-        }
-        setTimeout(checkSamOnline, 1000);
+    i2pProc = spawn(exe, ['--sam.enabled=1', '--sam.port=7656', '--socksproxy.enabled=1', '--socksproxy.port=4447', 
+      '--httpproxy.enabled=0', '--http.enabled=0'], {detached: true, stdio: 'ignore'});
+    i2pProc.unref();
+    log('[I2P] Daemon started.');
+    let ret = 0, maxRet = 120;
+    function chkSam() {
+      const s = net.connect({port: 7656, host: '127.0.0.1'}, () => {s.destroy(); log('[I2P] SAM online!'); cb(null, i2pProc);});
+      s.on('error', () => {
+        ret++;
+        if (ret % 5 === 0) log(`[I2P] Waiting... (${ret}/${maxRet})`);
+        if (ret >= maxRet) {cb(new Error(`SAM timeout`)); return;}
+        setTimeout(chkSam, 1000);
       });
     }
-
-    setTimeout(checkSamOnline, 1000);
-  } catch (err) {
-    callback(err);
-  }
+    setTimeout(chkSam, 1000);
+  } catch (e) {cb(e);}
 }
 
-function checkAndInstallI2P(callback) {
-  // Eerst testen of SAM Bridge al online is (poort 7656)
-  const checkSocket = net.connect({ port: 7656, host: '127.0.0.1' }, () => {
-    checkSocket.destroy();
-    console.log('[I2P Manager] SAM Bridge is al actief op poort 7656.');
-    callback(null, null); // Reeds actief
+function chkI2P(cb) {
+  const cs = net.connect({port: 7656, host: '127.0.0.1'}, () => {
+    cs.destroy();
+    log('[I2P] SAM active');
+    cb(null, null);
   });
-
-  checkSocket.on('error', () => {
-    // SAM Bridge is offline, we moeten kijken of we i2pd lokaal hebben
-    const binDir = path.join(__dirname, 'bin', 'i2pd');
-    const exePath = path.join(binDir, 'i2pd.exe');
-
-    if (fs.existsSync(exePath)) {
-      console.log('[I2P Manager] SAM Bridge offline, maar lokale i2pd.exe gevonden. Starten...');
-      startI2pProcess(exePath, callback);
+  cs.on('error', () => {
+    const bd = path.join(__dirname, 'bin', 'i2pd'), exe = path.join(bd, 'i2pd.exe');
+    if (fs.existsSync(exe)) {
+      log('[I2P] Start local i2pd...');
+      strtI2p(exe, cb);
     } else {
-      console.log('[I2P Manager] SAM Bridge offline en geen lokale i2pd.exe gevonden.');
-      console.log('[I2P Manager] Downloaden van portable PurpleI2P i2pd (v2.60.0) voor Windows...');
-
-      fs.mkdirSync(binDir, { recursive: true });
-      const zipPath = path.join(binDir, 'i2pd.zip');
-      const file = fs.createWriteStream(zipPath);
-
-      const downloadUrl = 'https://github.com/PurpleI2P/i2pd/releases/download/2.60.0/i2pd_2.60.0_win64_mingw.zip';
-
-      function downloadFile(url) {
-        https.get(url, (response) => {
-          if (response.statusCode === 302 || response.statusCode === 301) {
-            downloadFile(response.headers.location);
-            return;
-          }
-          if (response.statusCode !== 200) {
-            callback(new Error(`Download mislukt met statuscode ${response.statusCode}`));
-            return;
-          }
-          response.pipe(file);
+      log('[I2P] Downloading i2pd...');
+      fs.mkdirSync(bd, {recursive: true});
+      const zp = path.join(bd, 'i2pd.zip'), file = fs.createWriteStream(zp);
+      const url = 'https://github.com/PurpleI2P/i2pd/releases/download/2.60.0/i2pd_2.60.0_win64_mingw.zip';
+      function dl(u) {
+        https.get(u, (res) => {
+          if (res.statusCode === 302 || res.statusCode === 301) {dl(res.headers.location); return;}
+          if (res.statusCode !== 200) {cb(new Error(`Download failed`)); return;}
+          res.pipe(file);
           file.on('finish', () => {
             file.close(() => {
-              console.log('[I2P Manager] Download voltooid. Uitpakken van ZIP via PowerShell...');
+              log('[I2P] Extracting...');
               try {
-                const escapedZipPath = zipPath.replace(/'/g, "''");
-                const escapedBinDir = binDir.replace(/'/g, "''");
-                execSync(`powershell -Command "Expand-Archive -Path '${escapedZipPath}' -DestinationPath '${escapedBinDir}' -Force"`);
-                fs.unlinkSync(zipPath); // Verwijder de ZIP
-
-                // Zoek recursief naar i2pd.exe (in het geval van een geneste ZIP structuur)
-                const foundExe = findFileRecursively(binDir, 'i2pd.exe');
-                if (foundExe) {
-                  if (foundExe !== exePath) {
-                    fs.renameSync(foundExe, exePath);
-                  }
-                  console.log('[I2P Manager] Lokale i2pd succesvol geïnstalleerd. Starten...');
-                  startI2pProcess(exePath, callback);
-                } else {
-                  callback(new Error('i2pd.exe niet gevonden na het uitpakken van de ZIP.'));
-                }
-              } catch (extractErr) {
-                callback(new Error(`Fout bij uitpakken van ZIP: ${extractErr.message}`));
-              }
+                const ezp = zp.replace(/'/g, "''"), ebd = bd.replace(/'/g, "''");
+                execSync(`powershell -Command "Expand-Archive -Path '${ezp}' -DestinationPath '${ebd}' -Force"`);
+                fs.unlinkSync(zp);
+                const found = find(bd, 'i2pd.exe');
+                if (found) {
+                  if (found !== exe) fs.renameSync(found, exe);
+                  log('[I2P] Installed.');
+                  strtI2p(exe, cb);
+                } else cb(new Error('i2pd.exe not found'));
+              } catch (e) {cb(new Error(`Extract failed`));}
             });
           });
-        }).on('error', (err) => {
-          fs.unlinkSync(zipPath);
-          callback(err);
-        });
+        }).on('error', (e) => {fs.unlinkSync(zp); cb(e);});
       }
-
-      downloadFile(downloadUrl);
+      dl(url);
     }
   });
 }
 
-function findFileRecursively(dir, filename) {
-  const files = fs.readdirSync(dir);
-  for (const file of files) {
-    const fullPath = path.join(dir, file);
-    const stat = fs.statSync(fullPath);
-    if (stat.isDirectory()) {
-      const res = findFileRecursively(fullPath, filename);
-      if (res) return res;
-    } else if (file.toLowerCase() === filename.toLowerCase()) {
-      return fullPath;
-    }
+function find(dir, fn) {
+  const fs_list = fs.readdirSync(dir);
+  for (const f of fs_list) {
+    const fp = path.join(dir, f), st = fs.statSync(fp);
+    if (st.isDirectory()) {const r = find(fp, fn); if (r) return r;}
+    else if (f.toLowerCase() === fn.toLowerCase()) return fp;
   }
 }
 
-function convertI2PBase64toBase32(base64Destination) {
-  const sanitizedBase64 = base64Destination.replace(/-/g, '+').replace(/~/g, '/');
-  const binaryData = Buffer.from(sanitizedBase64, 'base64');
-  const hash = crypto.createHash('sha256').update(binaryData).digest();
-
-  const base32Alphabet = "abcdefghijklmnopqrstuvwxyz234567";
-  let base32String = "";
-
-  let bits = 0;
-  let value = 0;
-  for (let i = 0; i < hash.length; i++) {
-    value = (value << 8) | hash[i];
+function cvt64to32(b64) {
+  const sb = b64.replace(/-/g, '+').replace(/~/g, '/'), bd = Buffer.from(sb, 'base64'), 
+    h = crypto.createHash('sha256').update(bd).digest();
+  const a = "abcdefghijklmnopqrstuvwxyz234567";
+  let b32 = "";
+  let bits = 0, val = 0;
+  for (let i = 0; i < h.length; i++) {
+    val = (val << 8) | h[i];
     bits += 8;
-    while (bits >= 5) {
-      base32String += base32Alphabet[(value >>> (bits - 5)) & 31];
-      bits -= 5;
-    }
+    while (bits >= 5) {b32 += a[(val >>> (bits - 5)) & 31]; bits -= 5;}
   }
-  if (bits > 0) {
-    base32String += base32Alphabet[(value << (5 - bits)) & 31];
-  }
-
-  return base32String + ".b32.i2p";
+  if (bits > 0) b32 += a[(val << (5 - bits)) & 31];
+  return b32 + ".b32.i2p";
 }
 
-module.exports = {
-  login,
-  lookup,
-  connectSocks5,
-  convertI2PBase64toBase32,
-  performSendFlow,
-  startReceiver,
-  checkAndInstallI2P,
-  I2P_CONFIG
-};
+module.exports = {login, lookup, connSocks5, cvt64to32, sendFile, startRecv, chkI2P, I2P};
 
-// ═══════════════════════════════════════════════════════════════════════════
-// WEB UI — Ingebouwde HTTP Server
-// ═══════════════════════════════════════════════════════════════════════════
-
-// App state (RAM-only)
-const webState = {
-  isOnline: false,
-  username: null,
-  myBase32Address: null,
-  authToken: null,
-  samSocket: null,
-  hasNewFiles: false,
-  logs: [],
-  activeTransfers: { sends: {}, receives: {} },
-};
-
-// Patch console globally so that all console.log/error statements are written to stdout, webState.logs, and nexus.log
-const _origConsoleLog = console.log.bind(console);
-const _origConsoleErr = console.error.bind(console);
-
-console.log = (...args) => {
-  const msg = args.join(' ');
-  _origConsoleLog(msg);
-  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const line = `[${ts}] ${msg}`;
-  logStream.write(line + '\n');
-  webState.logs.push(line);
-  if (webState.logs.length > LOG_MAX) webState.logs.shift();
-};
-
-console.error = (...args) => {
-  const msg = args.join(' ');
-  _origConsoleErr(msg);
-  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const line = `[${ts}] [FOUT] ${msg}`;
-  logStream.write(line + '\n');
-  webState.logs.push(line);
-  if (webState.logs.length > LOG_MAX) webState.logs.shift();
-};
-
-// Backwards compatibility for webLog
-function webLog(msg) {
-  console.log(msg);
-}
-
-function sendJSON(res, code, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(code, {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(body),
-    'Cache-Control': 'no-store',
-  });
-  res.end(body);
-}
-
-function readBody(req, maxSize = 10 * 1024) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let received = 0;
-    const onData = c => {
-      received += c.length;
-      if (received > maxSize) {
-        req.removeListener('data', onData);
-        reject(new Error('Payload te groot'));
-        return;
-      }
-      chunks.push(c);
-    };
-    req.on('data', onData);
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
-}
-
-const MIME_TYPES = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.ico': 'image/x-icon',
-  '.png': 'image/png',
-  '.svg': 'image/svg+xml',
-};
-
-function serveStaticFile(res, filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  const mime = MIME_TYPES[ext] || 'application/octet-stream';
-  fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404); res.end('Not Found'); return; }
-    res.writeHead(200, { 'Content-Type': mime });
-    res.end(data);
-  });
-}
-
-function serveIndex(res) {
-  fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8', (err, html) => {
-    if (err) { res.writeHead(500); res.end('UI niet gevonden. Controleer of de public/ map aanwezig is.'); return; }
-    // Injecteer het session token in de <meta> placeholder
-    const injected = html.replace('__SESSION_TOKEN_PLACEHOLDER__', WEB_SESSION_TOKEN);
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(injected);
-  });
-}
-
-
-
-// ── Inkomende transfer UI callback ───────────────────────────────────────────
-function onIncomingTransferUI(info, acceptFn, declineFn) {
-  if (!webState.isOnline) {
-    webLog(`[Ontvanger] Inkomende transfer geweigerd: node is offline/uitgelogd.`);
-    declineFn();
-    return;
-  }
+function onIncomingUI(info, acceptFn, declineFn) {
+  if (!web.isOn) {log(`[Recv] Transfer rejected: offline.`); declineFn(); return;}
   const id = crypto.randomBytes(4).toString('hex');
-  webLog(`[Ontvanger] Inkomend: '${info.filename}' van '${info.username}' (${(info.file_size / 1048576).toFixed(2)} MB) — wacht op UI-beslissing...`);
-  webState.activeTransfers.receives[id] = {
-    filename: info.filename,
-    sender: info.username,
-    received: 0,
-    size: info.file_size,
-    status: 'waiting_approval',
-    acceptFn,
-    declineFn,
-  };
+  log(`[Recv] Inbound: '${info.filename}' from '${info.username}' (${(info.file_size / 1048576).toFixed(2)} MB)`);
+  web.transfers.recv[id] = {filename: info.filename, sender: info.username, got: 0, size: info.file_size, status: 'waiting', acceptFn, declineFn};
 }
 
-// ── API handlers ─────────────────────────────────────────────────────────────
-
-async function handleWebRegister(req, res) {
+async function handleReg(req, res) {
   let body;
-  try { body = JSON.parse((await readBody(req)).toString()); }
-  catch { return sendJSON(res, 400, { status: 'error', message: 'Ongeldig JSON verzoek.' }); }
-
-  const { username, password } = body;
-  if (!username || !password)
-    return sendJSON(res, 400, { status: 'error', message: 'Gebruikersnaam en wachtwoord verplicht.' });
-
-  webLog(`[Register] Registreren van '${username}'...`);
-
-  sendAuthRequest({ action: 'register', username, password }, (err, r) => {
-    if (err) {
-      webLog(`[Register] Netwerkfout: ${err.message}`);
-      return sendJSON(res, 503, { status: 'error', message: `Kan niet verbinden met auth server: ${err.message}` });
-    }
-
-    if (r.status === 'success') {
-      webLog(`[Register] Succes: '${username}' aangemaakt.`);
-      sendJSON(res, 200, { status: 'success', message: r.message });
-    } else {
-      webLog(`[Register] Mislukt: ${r.message}`);
-      sendJSON(res, 400, { status: 'error', message: r.message || 'Registratie mislukt' });
-    }
+  try {body = JSON.parse((await readBody(req)).toString());} catch {return sendJSON(res, 400, {status: 'error', message: 'Bad JSON'});}
+  const {username, password} = body;
+  if (!username || !password) return sendJSON(res, 400, {status: 'error', message: 'Required'});
+  log(`[Reg] Register '${username}'...`);
+  sendAuth({action: 'register', username, password}, (e, r) => {
+    if (e) {return sendJSON(res, 503, {status: 'error', message: `Auth error`});}
+    if (r.status === 'success') {log(`[Reg] Success`); sendJSON(res, 200, {status: 'success', message: r.message});}
+    else {sendJSON(res, 400, {status: 'error', message: r.message || 'Failed'});}
   });
 }
 
-async function handleWebLogin(req, res) {
-  if (webState.isOnline)
-    return sendJSON(res, 409, { status: 'error', message: 'Node is al actief. Log eerst uit.' });
-
+async function handleLogin(req, res) {
+  if (web.isOn) return sendJSON(res, 409, {status: 'error', message: 'Node online'});
   let body;
-  try { body = JSON.parse((await readBody(req)).toString()); }
-  catch { return sendJSON(res, 400, { status: 'error', message: 'Ongeldig JSON verzoek.' }); }
-
-  const { username, password } = body;
-  if (!username || !password)
-    return sendJSON(res, 400, { status: 'error', message: 'Gebruikersnaam en wachtwoord verplicht.' });
-
-  webLog(`[Login] Inloggen als '${username}'...`);
-
-  login(username, password, i2pState.address || '', AUTH_HOST, AUTH_PORT_UI, (err, sessionToken) => {
-    if (err) {
-      webLog(`[Login] Mislukt: ${err.message}`);
-      return sendJSON(res, 503, { status: 'error', message: err.message });
-    }
-
-    webState.isOnline = true;
-    webState.username = username;
-    webState.authToken = sessionToken;
-    webState.myBase32Address = i2pState.address || null;
-
-    webLog(`[Login] Online als '${username}'.`);
-
-    // Koppel het I2P-adres als het al online is
-    if (i2pState.status === 'online') {
-      updateAddressOnCentralServer(sessionToken, i2pState.address);
-    } else {
-      webLog(`[Login] I2P tunnel is nog aan het opstarten op de achtergrond...`);
-    }
-
-    fs.mkdirSync(getCurrentUserReceivedDir(), { recursive: true });
-    sendJSON(res, 200, { status: 'success', myBase32Address: webState.myBase32Address });
+  try {body = JSON.parse((await readBody(req)).toString());} catch {return sendJSON(res, 400, {status: 'error', message: 'Bad JSON'});}
+  const {username, password} = body;
+  if (!username || !password) return sendJSON(res, 400, {status: 'error', message: 'Required'});
+  log(`[Login] '${username}'...`);
+  login(username, password, i2p.addr || '', HOST, PORT, (e, tok) => {
+    if (e) {return sendJSON(res, 503, {status: 'error', message: e.message});}
+    web.isOn = true; web.user = username; web.tok = tok; web.i2pAddr = i2p.addr || null;
+    log(`[Login] Online`);
+    if (i2p.status === 'online') updAddr(tok, i2p.addr);
+    fs.mkdirSync(getCurDir(), {recursive: true});
+    sendJSON(res, 200, {status: 'success', myBase32Address: web.i2pAddr});
   });
 }
 
-async function handleWebSend(req, res) {
-  if (!webState.isOnline)
-    return sendJSON(res, 403, { status: 'error', message: 'Node is niet actief. Log eerst in.' });
-
+async function handleSend(req, res) {
+  if (!web.isOn) return sendJSON(res, 403, {status: 'error', message: 'Offline'});
   let body;
-  try { body = JSON.parse((await readBody(req, Infinity)).toString()); }
-  catch { return sendJSON(res, 400, { status: 'error', message: 'Ongeldig JSON verzoek.' }); }
-
-  const { recipient, filename, fileData } = body;
-  if (!recipient || !filename || !fileData)
-    return sendJSON(res, 400, { status: 'error', message: 'Ontbrekende velden: recipient, filename, fileData.' });
-
-  const safeFilename = path.basename(filename);
-  if (!safeFilename || safeFilename.includes('..') || !/^[a-zA-Z0-9_\-\. ]+$/.test(safeFilename))
-    return sendJSON(res, 400, { status: 'error', message: 'Onveilige bestandsnaam. Alleen letters, cijfers, underscores (_), streepjes (-), punten (.) en spaties zijn toegestaan.' });
-
-  let fileBuffer;
-  try { fileBuffer = Buffer.from(fileData, 'base64'); }
-  catch { return sendJSON(res, 400, { status: 'error', message: 'Ongeldige Base64 data.' }); }
-
-  const tmpDir = path.join(__dirname, 'sending_tmp');
-  fs.mkdirSync(tmpDir, { recursive: true });
-  const tmpFile = path.join(tmpDir, `${Date.now()}_${safeFilename}`);
-  try {
-    fs.writeFileSync(tmpFile, fileBuffer);
-  } catch (err) {
-    webLog(`[Verzender] Fout bij schrijven tijdelijk bestand: ${err.message}`);
-    return sendJSON(res, 500, { status: 'error', message: 'Kan tijdelijk bestand niet opslaan.' });
-  }
-
+  try {body = JSON.parse((await readBody(req, Infinity)).toString());} catch {return sendJSON(res, 400, {status: 'error', message: 'Bad JSON'});}
+  const {recipient, filename, fileData} = body;
+  if (!recipient || !filename || !fileData) return sendJSON(res, 400, {status: 'error', message: 'Missing'});
+  const sf = path.basename(filename);
+  if (!sf || sf.includes('..') || !/^[a-zA-Z0-9_\-\. ]+$/.test(sf)) return sendJSON(res, 400, {status: 'error', message: 'Unsafe'});
+  let fb;
+  try {fb = Buffer.from(fileData, 'base64');} catch {return sendJSON(res, 400, {status: 'error', message: 'Bad Base64'});}
+  const td = path.join(__dirname, 'sending_tmp');
+  fs.mkdirSync(td, {recursive: true});
+  const tf = path.join(td, `${Date.now()}_${sf}`);
+  try {fs.writeFileSync(tf, fb);} catch (e) {return sendJSON(res, 500, {status: 'error', message: 'Write failed'});}
   const tid = crypto.randomBytes(4).toString('hex');
-  webState.activeTransfers.sends[tid] = {
-    filename: safeFilename, target: recipient,
-    sent: 0, size: fileBuffer.length, status: 'sending',
-  };
-
-  webLog(`[Verzender] Start: '${safeFilename}' → '${recipient}'...`);
-
-  performSendFlow(tmpFile, recipient, webState.username, webState.authToken, AUTH_HOST, AUTH_PORT_UI, (err) => {
-    try { fs.unlinkSync(tmpFile); } catch { }
-    const t = webState.activeTransfers.sends[tid];
-    if (t) {
-      t.status = err ? 'failed' : 'complete';
-      if (!err) { t.sent = fileBuffer.length; }
-      setTimeout(() => delete webState.activeTransfers.sends[tid], 10000);
-    }
-    if (err) console.error(`[Verzender] Mislukt: ${err}`);
-    else console.log(`[Verzender] '${safeFilename}' succesvol verzonden naar '${recipient}'.`);
+  web.transfers.send[tid] = {filename: sf, target: recipient, sent: 0, size: fb.length, status: 'sending'};
+  log(`[Send] Start: '${sf}' → '${recipient}'...`);
+  sendFile(tf, recipient, web.user, web.tok, HOST, PORT, (e) => {
+    try {fs.unlinkSync(tf);} catch {}
+    const t = web.transfers.send[tid];
+    if (t) {t.status = e ? 'failed' : 'complete'; if (!e) t.sent = fb.length; setTimeout(() => delete web.transfers.send[tid], 10000);}
+    if (e) log(`[Send] Failed`); else log(`[Send] Sent`);
   });
-
-  sendJSON(res, 200, { status: 'success', message: `Verzending gestart voor '${safeFilename}'.` });
+  sendJSON(res, 200, {status: 'success', message: `Sending`});
 }
 
-async function handleWebAccept(req, res) {
+async function handleAccept(req, res) {
   let body;
-  try { body = JSON.parse((await readBody(req)).toString()); }
-  catch { return sendJSON(res, 400, { status: 'error', message: 'Ongeldig JSON.' }); }
-
-  const t = webState.activeTransfers.receives[body.transferId];
-  if (!t || t.status !== 'waiting_approval')
-    return sendJSON(res, 404, { status: 'error', message: 'Transfer niet gevonden of niet in wachtstatus.' });
-
-  webLog(`[Ontvanger] Geaccepteerd: '${t.filename}' van '${t.sender}'.`);
+  try {body = JSON.parse((await readBody(req)).toString());} catch {return sendJSON(res, 400, {status: 'error'});}
+  const t = web.transfers.recv[body.transferId];
+  if (!t || t.status !== 'waiting') return sendJSON(res, 404, {status: 'error'});
+  log(`[Recv] Accepted`);
   t.status = 'receiving';
-
   t.acceptFn();
-
-  sendJSON(res, 200, { status: 'success', message: 'Transfer geaccepteerd.' });
+  sendJSON(res, 200, {status: 'success'});
 }
 
-async function handleWebDecline(req, res) {
+async function handleDecline(req, res) {
   let body;
-  try { body = JSON.parse((await readBody(req)).toString()); }
-  catch { return sendJSON(res, 400, { status: 'error', message: 'Ongeldig JSON.' }); }
-
-  const t = webState.activeTransfers.receives[body.transferId];
-  if (!t || t.status !== 'waiting_approval')
-    return sendJSON(res, 404, { status: 'error', message: 'Transfer niet gevonden of niet in wachtstatus.' });
-
-  webLog(`[Ontvanger] Geweigerd: '${t.filename}' van '${t.sender}'.`);
+  try {body = JSON.parse((await readBody(req)).toString());} catch {return sendJSON(res, 400, {status: 'error'});}
+  const t = web.transfers.recv[body.transferId];
+  if (!t || t.status !== 'waiting') return sendJSON(res, 404, {status: 'error'});
+  log(`[Recv] Declined`);
   t.declineFn();
-  delete webState.activeTransfers.receives[body.transferId];
-  sendJSON(res, 200, { status: 'success', message: 'Transfer geweigerd.' });
+  delete web.transfers.recv[body.transferId];
+  sendJSON(res, 200, {status: 'success'});
 }
 
-async function handleWebLogout(req, res) {
-  if (!webState.isOnline)
-    return sendJSON(res, 400, { status: 'error', message: 'Node is al offline.' });
-
-  webLog('[Logout] Node sessie beëindigd door gebruiker.');
-  webState.isOnline = false; webState.username = null;
-  webState.myBase32Address = null; webState.authToken = null;
-  webState.activeTransfers = { sends: {}, receives: {} };
-  sendJSON(res, 200, { status: 'success', message: 'Uitgelogd.' });
+async function handleLogout(req, res) {
+  if (!web.isOn) return sendJSON(res, 400, {status: 'error'});
+  log('[Logout] End');
+  web.isOn = false; web.user = null; web.i2pAddr = null; web.tok = null; web.transfers = {send: {}, recv: {}};
+  sendJSON(res, 200, {status: 'success'});
 }
 
-function handleWebStatus(req, res) {
-  const url = new URL(req.url, `http://localhost:${UI_PORT}`);
-  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
-  const newLogs = webState.logs.slice(offset);
-
-  const cleanReceives = {};
-  for (const [id, t] of Object.entries(webState.activeTransfers.receives)) {
-    cleanReceives[id] = { filename: t.filename, sender: t.sender, received: t.received, size: t.size, status: t.status };
-  }
-
-  const hadNewFiles = webState.hasNewFiles;
-  webState.hasNewFiles = false;
-
-  sendJSON(res, 200, {
-    status: 'success',
-    isOnline: webState.isOnline,
-    username: webState.username,
-    myBase32Address: webState.myBase32Address || i2pState.address,
-    i2pStatus: i2pState.status,
-    i2pError: i2pState.error,
-    logs: newLogs,
-    activeTransfers: { sends: webState.activeTransfers.sends, receives: cleanReceives },
-    hasNewFiles: hadNewFiles,
-  });
+function handleStatus(req, res) {
+  const url = new URL(req.url, `http://localhost:${UI_P}`), off = parseInt(url.searchParams.get('offset') || '0', 10);
+  const nLogs = web.logs.slice(off);
+  const cr = {};
+  for (const [id, t] of Object.entries(web.transfers.recv)) {if (t.status !== 'waiting') cr[id] = t;}
+  sendJSON(res, 200, {status: 'success', isOnline: web.isOn, username: web.user, myBase32Address: web.i2pAddr || i2p.addr, 
+    i2pStatus: i2p.status, i2pError: i2p.err, logs: nLogs, activeTransfers: {sends: web.transfers.send, receives: cr}});
 }
 
-function handleWebFiles(req, res) {
-  try {
-    if (!webState.isOnline || !webState.username)
-      return sendJSON(res, 403, { status: 'error', message: 'Node is niet actief. Log eerst in.' });
-
-    const userReceivedDir = getCurrentUserReceivedDir();
-    fs.mkdirSync(userReceivedDir, { recursive: true });
-    const items = fs.readdirSync(userReceivedDir)
-      .filter(f => !f.endsWith('.tmp'))
-      .map(f => {
-        const s = fs.statSync(path.join(userReceivedDir, f));
-        return { name: f, size: s.size, mtime: s.mtimeMs };
-      })
-      .sort((a, b) => b.mtime - a.mtime);
-    sendJSON(res, 200, { status: 'success', files: items });
-  } catch (err) {
-    sendJSON(res, 500, { status: 'error', message: err.message });
-  }
+function handleFiles(req, res) {
+  try {const fd = getCurDir(); const files = fs.existsSync(fd) ? fs.readdirSync(fd) : []; 
+    const list = files.map(f => {const fp = path.join(fd, f); const st = fs.statSync(fp); return {name: f, size: st.size, mtime: st.mtime.toISOString()};});
+    sendJSON(res, 200, {status: 'success', files: list});} catch (e) {sendJSON(res, 500, {status: 'error'});}
 }
 
-function handleWebDownload(req, res) {
-  if (!webState.isOnline || !webState.username) { res.writeHead(403); res.end('Node is niet actief. Log eerst in.'); return; }
-  const url = new URL(req.url, `http://localhost:${UI_PORT}`);
-  const filename = url.searchParams.get('file');
-  if (!filename) { res.writeHead(400); res.end('Missing file parameter.'); return; }
-  const safe = path.basename(filename);
-  if (!safe || safe.includes('..') || safe !== filename || !/^[a-zA-Z0-9_\-\. ]+$/.test(safe)) {
-    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Invalid filename. Alleen letters, cijfers, underscores (_), streepjes (-), punten (.) en spaties zijn toegestaan.');
-    return;
-  }
-  const filePath = path.join(getCurrentUserReceivedDir(), safe);
-  if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('File not found.'); return; }
-  let stat;
-  try {
-    stat = fs.statSync(filePath);
-  } catch (err) {
-    res.writeHead(500);
-    res.end('File system error');
-    return;
-  }
-  res.writeHead(200, {
-    'Content-Type': 'application/octet-stream',
-    'Content-Disposition': `attachment; filename="${safe}"`,
-    'Content-Length': stat.size,
-  });
-  const stream = fs.createReadStream(filePath);
-  stream.on('error', () => {
-    if (!res.headersSent) {
-      res.writeHead(500);
-      res.end('File read error');
-    }
-  });
+function handleDownload(req, res) {
+  if (!web.isOn || !web.user) return sendJSON(res, 403, {status: 'error'});
+  const url = new URL(req.url, `http://localhost:${UI_P}`), fn = url.searchParams.get('file');
+  if (!fn) return sendJSON(res, 400, {status: 'error'});
+  const sf = path.basename(fn);
+  if (!sf || sf.includes('..') || sf !== fn || !/^[a-zA-Z0-9_\-\. ]+$/.test(sf)) return sendJSON(res, 400, {status: 'error'});
+  const fp = path.join(getCurDir(), sf);
+  if (!fs.existsSync(fp)) return sendJSON(res, 404, {status: 'error'});
+  let st;
+  try {st = fs.statSync(fp);} catch (e) {return sendJSON(res, 500, {status: 'error'});}
+  res.writeHead(200, {'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${sf}"`, 'Content-Length': st.size});
+  const stream = fs.createReadStream(fp);
+  stream.on('error', () => {});
   stream.pipe(res);
 }
 
-function handleWebShutdown(req, res) {
-  webLog('[Shutdown] Terminatie ontvangen. Server stopt...');
-  sendJSON(res, 200, { status: 'success', message: 'Server wordt afgesloten.' });
-  if (i2pState.samSocket) { try { i2pState.samSocket.destroy(); } catch { } }
+function handleShutdown(req, res) {
+  log('[Shutdown] Exit...');
+  sendJSON(res, 200, {status: 'success'});
+  if (i2p.sock) i2p.sock.destroy();
   setTimeout(() => process.exit(0), 500);
 }
 
-// ── PHP Auth Server starten ────────────────────────────────────────────
-function startPhpServer(callback) {
-  if (AUTH_USE_HTTP) {
-    webLog(`[PHP Server] Externe auth server geconfigureerd (${AUTH_SERVER_URL}); lokale server.php wordt overgeslagen.`);
-    callback();
-    return;
-  }
-
-  // Check of poort 8000 al in gebruik is (server draait al)
-  const testSocket = net.connect({ host: '127.0.0.1', port: AUTH_PORT_UI }, () => {
-    testSocket.destroy();
-    webLog('[PHP Server] Auth server is al actief op poort ' + AUTH_PORT_UI + '.');
-    callback();
-  });
-
-  testSocket.on('error', () => {
-    // Poort vrij — start php server.php
-    const phpScript = path.join(__dirname, 'server.php');
-    if (!fs.existsSync(phpScript)) {
-      webLog('[PHP Server] WAARSCHUWING: server.php niet gevonden! Auth server niet gestart.');
-      return callback();
-    }
-
-    webLog('[PHP Server] Starten van server.php op poort ' + AUTH_PORT_UI + '...');
-
-    const phpProc = spawn('php', [phpScript, String(AUTH_PORT_UI)], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: false,
-    });
-
-    phpProc.stdout.on('data', data => {
-      const lines = data.toString().trim().split('\n');
-      lines.forEach(l => l && webLog('[PHP] ' + l.trim()));
-    });
-    phpProc.stderr.on('data', data => {
-      const lines = data.toString().trim().split('\n');
-      lines.forEach(l => l && webLog('[PHP FOUT] ' + l.trim()));
-    });
-
-    phpProc.on('exit', (code) => {
-      webLog(`[PHP Server] server.php beëindigd (code ${code}).`);
-    });
-
-    // Wacht tot de PHP server luistert (max 5s)
-    let tries = 0;
-    const checkReady = () => {
-      const s = net.connect({ host: '127.0.0.1', port: AUTH_PORT_UI }, () => {
-        s.destroy();
-        webLog('[PHP Server] Auth server luistert op poort ' + AUTH_PORT_UI + '. Klaar!');
-        callback();
-      });
-      s.on('error', () => {
-        tries++;
-        if (tries >= 10) {
-          webLog('[PHP Server] FOUT: Auth server reageerde niet na 5s.');
-          callback();
-        } else {
-          setTimeout(checkReady, 500);
-        }
-      });
-    };
-    setTimeout(checkReady, 500);
-
-    // Ruim PHP op bij afsluiten Node
-    process.on('exit', () => { try { phpProc.kill(); } catch {} });
-    process.on('SIGINT', () => { try { phpProc.kill(); } catch {} process.exit(0); });
-    process.on('SIGTERM', () => { try { phpProc.kill(); } catch {} process.exit(0); });
+function startPhpSrv(cb) {
+  if (USE_HTTP) {log('[PHP] Using HTTP'); cb(null); return;}
+  const ts = net.connect({host: '127.0.0.1', port: PORT}, () => {ts.destroy(); log('[PHP] Running'); cb(null);});
+  ts.on('error', () => {
+    log('[PHP] Start server...');
+    let proc;
+    try {
+      proc = spawn('php', ['-S', `127.0.0.1:${PORT}`, path.join(__dirname, 'server.php')], {cwd: __dirname, stdio: 'pipe'});
+      let started = false;
+      proc.stdout.on('data', () => {if (!started) {started = true; log('[PHP] OK'); cb(null);}});
+      process.on('exit', () => {try {proc.kill();} catch {}});
+    } catch (e) {cb(e);}
   });
 }
 
-// ── HTTP Server + Router ──────────────────────────────────────────────────────
 function startWebUI() {
-  WEB_SESSION_TOKEN = crypto.randomBytes(32).toString('hex');
-
-  // Log separator bij elke nieuwe start
-  logStream.write('\n' + '='.repeat(60) + '\n');
-  logStream.write(`[${new Date().toISOString()}] NEXUS SHARE gestart\n`);
-  logStream.write('='.repeat(60) + '\n');
-
-  // Eerst PHP auth server starten, dan pas de web UI en I2P booten
-  startPhpServer(() => {
-    // Start I2P op de achtergrond
-    bootI2P();
-
-    const server = http.createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', `http://localhost:${UI_PORT}`);
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Session-Token');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; object-src 'none';");
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
-    const urlPath = req.url.split('?')[0];
-
-    // Statische bestanden
-    if (req.method === 'GET' && urlPath === '/') return serveIndex(res);
-    if (req.method === 'GET' && ['/app.js', '/index.css'].includes(urlPath))
-      return serveStaticFile(res, path.join(PUBLIC_DIR, urlPath));
-
-    // API — vereist geldig session token
-    if (urlPath.startsWith('/api/')) {
-      if (req.headers['x-session-token'] !== WEB_SESSION_TOKEN)
-        return sendJSON(res, 403, { status: 'error', message: 'Ongeldig session token.' });
-
-      try {
-        if (req.method === 'POST' && urlPath === '/api/register') return await handleWebRegister(req, res);
-        if (req.method === 'POST' && urlPath === '/api/login') return await handleWebLogin(req, res);
-        if (req.method === 'POST' && urlPath === '/api/send') return await handleWebSend(req, res);
-        if (req.method === 'POST' && urlPath === '/api/accept') return await handleWebAccept(req, res);
-        if (req.method === 'POST' && urlPath === '/api/decline') return await handleWebDecline(req, res);
-        if (req.method === 'POST' && urlPath === '/api/logout') return await handleWebLogout(req, res);
-        if (req.method === 'POST' && urlPath === '/api/shutdown') return handleWebShutdown(req, res);
-        if (req.method === 'GET' && urlPath === '/api/status') return handleWebStatus(req, res);
-        if (req.method === 'GET' && urlPath === '/api/files') return handleWebFiles(req, res);
-        if (req.method === 'GET' && urlPath === '/api/download') return handleWebDownload(req, res);
-      } catch (err) {
-        webLog(`[Server Fout] ${err.message}`);
-        return sendJSON(res, 500, { status: 'error', message: 'Interne serverfout: ' + err.message });
-      }
-
-      return sendJSON(res, 404, { status: 'error', message: `Endpoint niet gevonden: ${urlPath}` });
-    }
-
-    res.writeHead(404); res.end('Not Found');
+  TOKEN = crypto.randomBytes(32).toString('hex');
+  logSt.write('\n' + '='.repeat(50) + '\n[App Start]\n' + '='.repeat(50) + '\n');
+  startPhpSrv(() => {
+    const http_srv = http.createServer(async (req, res) => {
+      const tkn = req.headers['x-session-token'];
+      if (tkn !== TOKEN) {res.writeHead(401); res.end('Unauthorized'); return;}
+      const u = new URL(req.url, `http://localhost:${UI_P}`).pathname;
+      if (u === '/') serveIndex(res);
+      else if (u.startsWith('/public/')) serveStatic(res, path.join(PUB, u.slice(8)));
+      else if (u === '/api/register' && req.method === 'POST') await handleReg(req, res);
+      else if (u === '/api/login' && req.method === 'POST') await handleLogin(req, res);
+      else if (u === '/api/send' && req.method === 'POST') await handleSend(req, res);
+      else if (u === '/api/accept' && req.method === 'POST') await handleAccept(req, res);
+      else if (u === '/api/decline' && req.method === 'POST') await handleDecline(req, res);
+      else if (u === '/api/logout' && req.method === 'POST') await handleLogout(req, res);
+      else if (u === '/api/status') handleStatus(req, res);
+      else if (u === '/api/files') handleFiles(req, res);
+      else if (u === '/api/download') handleDownload(req, res);
+      else if (u === '/api/shutdown' && req.method === 'POST') handleShutdown(req, res);
+      else {res.writeHead(404); res.end();}
     });
-
-    server.listen(UI_PORT, '127.0.0.1', () => {
-      console.log('');
-      console.log('╔══════════════════════════════════════════════════╗');
-      console.log('║         NEXUS SHARE — Web UI (p2p.js)            ║');
-      console.log('╠══════════════════════════════════════════════════╣');
-      console.log(`║  URL:  http://localhost:${UI_PORT}                      ║`);
-      console.log(`║  Log:  nexus.log                                  ║`);
-      console.log('╚══════════════════════════════════════════════════╝');
-      console.log('');
-      console.log('Browser opent automatisch. Druk CTRL+C om te stoppen.');
-      webLog('[Server] Web UI actief op poort ' + UI_PORT + '.');
-      exec(`start http://localhost:${UI_PORT}`);
+    http_srv.listen(UI_P, () => {
+      log(`[Web] UI on http://localhost:${UI_P}`);
+      bootI2P();
     });
-
-    // Start een periodieke keepalive-taak (elke 60 seconden) om sessie-timeout te voorkomen
-    setInterval(() => {
-      if (webState.isOnline && webState.authToken && (webState.myBase32Address || i2pState.address)) {
-        updateAddressOnCentralServer(webState.authToken, webState.myBase32Address || i2pState.address);
-      }
-    }, 60000);
-
-    server.on('error', err => {
-      if (err.code === 'EADDRINUSE')
-        console.error(`\n[FOUT] Poort ${UI_PORT} is al in gebruik. Stop het andere programma.\n`);
-      else
-        console.error('[Server Fout]', err.message);
-      process.exit(1);
-    });
-  }); // einde startPhpServer callback
+  });
 }
-

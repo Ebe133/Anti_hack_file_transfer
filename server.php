@@ -1,591 +1,224 @@
 <?php
-/**
- * Day 3: PHP Central Auth & Directory Server (server.php)
- *
- * Dual mode:
- * - Web mode (PHP-FPM/Apache): JSON API for hosted central server endpoints.
- * - CLI mode: legacy TCP socket daemon for local development/tests.
- */
-
 error_reporting(E_ALL);
 ini_set('display_errors', PHP_SAPI === 'cli' ? '1' : '0');
 
-$preferredDataDir = dirname(__DIR__) . '/nexus_data';
-$fallbackDataDir = __DIR__ . '/nexus_data';
-$dataDir = $preferredDataDir;
+$dDir = (is_dir($p = dirname(__DIR__) . '/nexus_data') || @mkdir($p, 0700, true)) ? $p : __DIR__ . '/nexus_data';
+@mkdir($dDir, 0700, true);
 
-if (!is_dir($dataDir) && !@mkdir($dataDir, 0700, true) && !is_dir($dataDir)) {
-    $dataDir = $fallbackDataDir;
-    if (!is_dir($dataDir)) {
-        @mkdir($dataDir, 0700, true);
-    }
+$uDb = $dDir . '/users.db.json';
+$sDb = $dDir . '/sessions.db.json';
+$aDb = $dDir . '/auth_state.db.json';
+
+foreach ([$uDb, $sDb] as $f) {
+  if (!file_exists($f)) {file_put_contents($f, '{}'); @chmod($f, 0600);}
 }
 
-$userDbFile = $dataDir . '/users.db.json';
-$sessionDbFile = $dataDir . '/sessions.db.json';
-$authStateFile = $dataDir . '/auth_state.db.json';
-
-if (!file_exists($userDbFile)) {
-    file_put_contents($userDbFile, json_encode([]));
-    @chmod($userDbFile, 0600);
-}
-if (!file_exists($sessionDbFile)) {
-    file_put_contents($sessionDbFile, json_encode([]));
-    @chmod($sessionDbFile, 0600);
-}
-
-function loadJsonFile(string $filePath, array $fallback = []): array {
-    if (!file_exists($filePath)) {
-        return $fallback;
-    }
-
-    $fp = @fopen($filePath, 'rb');
-    if ($fp === false) {
-        return $fallback;
-    }
-
-    $raw = '';
-    if (@flock($fp, LOCK_SH)) {
-        $read = stream_get_contents($fp);
-        $raw = $read === false ? '' : $read;
-        @flock($fp, LOCK_UN);
-    }
-    fclose($fp);
-
-    if ($raw === false || $raw === '') {
-        return $fallback;
-    }
-
-    $decoded = json_decode($raw, true);
-    return is_array($decoded) ? $decoded : $fallback;
+function ld(string $p, array $fb = []): array {
+  if (!file_exists($p)) return $fb;
+  $fp = @fopen($p, 'rb');
+  if (!$fp) return $fb;
+  @flock($fp, LOCK_SH);
+  $d = stream_get_contents($fp);
+  @flock($fp, LOCK_UN);
+  fclose($fp);
+  $r = json_decode($d ?: '', true);
+  return is_array($r) ? $r : $fb;
 }
 
-function saveJsonFile(string $filePath, array $data): void {
-    $dir = dirname($filePath);
-    if (!is_dir($dir)) {
-        @mkdir($dir, 0700, true);
-    }
-
-    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-    if ($json === false) {
-        return;
-    }
-
-    $tmpFile = $filePath . '.tmp';
-    $fp = @fopen($tmpFile, 'wb');
-    if ($fp === false) {
-        return;
-    }
-
-    $bytesWritten = 0;
-    if (@flock($fp, LOCK_EX)) {
-        $bytesWritten = fwrite($fp, $json);
-        fflush($fp);
-        @flock($fp, LOCK_UN);
-    }
-    fclose($fp);
-
-    if ($bytesWritten === strlen($json)) {
-        @rename($tmpFile, $filePath);
-        @chmod($filePath, 0600);
-    } else {
-        @unlink($tmpFile);
-        serverLog("Fout bij opslaan database: Schrijven naar tijdelijk bestand is mislukt (mogelijke schijf vol). Bewerking afgebroken.");
-    }
+function sv(string $p, array $d): void {
+  @mkdir(dirname($p), 0700, true);
+  $j = json_encode($d, JSON_PRETTY_PRINT);
+  $t = $p . '.tmp';
+  $fp = @fopen($t, 'wb');
+  if (!$fp) return;
+  @flock($fp, LOCK_EX);
+  fwrite($fp, $j);
+  fflush($fp);
+  @flock($fp, LOCK_UN);
+  fclose($fp);
+  @rename($t, $p);
+  @chmod($p, 0600);
 }
 
-function serverLog(string $msg): void {
-    if (PHP_SAPI === 'cli') {
-        echo $msg . "\n";
-    } else {
-        error_log($msg);
-    }
+function log_msg(string $m): void {
+  if (PHP_SAPI === 'cli') echo "$m\n";
+  else error_log($m);
 }
 
-function releaseDbLock($lockFp): void {
-    if ($lockFp) {
-        flock($lockFp, LOCK_UN);
-        fclose($lockFp);
-    }
+function jres(array $d, int $c = 200): void {
+  http_response_code($c);
+  header('Content-Type: application/json; charset=utf-8');
+  header('X-Content-Type-Options: nosniff');
+  header('Cache-Control: no-store');
+  echo json_encode($d) . "\n";
 }
 
-function jsonResponse(array $data, int $statusCode = 200): void {
-    http_response_code($statusCode);
-    header('Content-Type: application/json; charset=utf-8');
-    header('X-Content-Type-Options: nosniff');
-    header('Cache-Control: no-store');
-    header('Content-Security-Policy: default-src \'none\'; frame-ancestors \'none\';');
-    header('X-Frame-Options: DENY');
-    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+function chkLim(string $ip, string $aDb): ?array {
+  $s = ld($aDb, []);
+  $t = time();
+  foreach ($s as $k => $e) {
+    $ws = isset($e['ws']) ? (int)$e['ws'] : $t;
+    $bu = isset($e['bu']) ? (int)$e['bu'] : 0;
+    if (($t - $ws) > 86400 && $bu < $t) unset($s[$k]);
+  }
+  if (!isset($s[$ip])) $s[$ip] = ['ws' => $t, 'cnt' => 0, 'fl' => 0, 'bu' => 0];
+  $e = &$s[$ip];
+  if ($e['bu'] > $t) {sv($aDb, $s); return ['status' => 'error', 'message' => 'Blocked'];}
+  if (($t - (int)$e['ws']) >= 60) {$e['ws'] = $t; $e['cnt'] = 0;}
+  $e['cnt']++;
+  if ($e['cnt'] > 60) {$e['bu'] = $t + 60; sv($aDb, $s); return ['status' => 'error', 'message' => 'Rate limit'];}
+  sv($aDb, $s);
+  return null;
 }
 
-function enforceRateLimit(string $ip, string $authStateFile): ?array {
-    $state = loadJsonFile($authStateFile, []);
-    $now = time();
+function procAct(array $d, string $ip, array &$u, array &$s): array {
+  if (!isset($d['action'])) return ['status' => 'error', 'message' => 'No action'];
+  $a = (string)$d['action'];
+  switch ($a) {
+    case 'register':
+      $user = trim((string)($d['username'] ?? ''));
+      $pass = (string)($d['password'] ?? '');
+      if (!$user || !$pass) return ['status' => 'error', 'message' => 'Required'];
+      if (strlen($user) < 3 || strlen($user) > 32) return ['status' => 'error', 'message' => 'Length 3-32'];
+      $res = ['admin', 'root', 'system', 'anonymous', 'administrator', 'nexus', 'server', 'directory'];
+      if (in_array(strtolower($user), $res, true)) return ['status' => 'error', 'message' => 'Reserved'];
+      if (isset($u[$user])) return ['status' => 'error', 'message' => 'Exists'];
+      $u[$user] = password_hash($pass, PASSWORD_BCRYPT);
+      return ['status' => 'success', 'message' => 'Created'];
 
-    foreach ($state as $key => $entry) {
-        $windowStart = isset($entry['window_start']) ? (int)$entry['window_start'] : $now;
-        $blockedUntil = isset($entry['blocked_until']) ? (int)$entry['blocked_until'] : 0;
-        if (($now - $windowStart) > 86400 && $blockedUntil < $now) {
-            unset($state[$key]);
+    case 'login':
+      $user = trim((string)($d['username'] ?? ''));
+      $pass = (string)($d['password'] ?? '');
+      $addr = trim((string)($d['address'] ?? ''));
+      $dum = '$2y$10$reZ1lKex5oG1U1W1E1E1Eu1V1E1E1E1E1E1E1E1E1E1E1E1E1E1E1';
+      $ex = isset($u[$user]);
+      $h = $ex ? (string)$u[$user] : $dum;
+      if (!password_verify($pass, $h) || !$ex) return ['status' => 'error', 'message' => 'Invalid'];
+      if ($addr && !preg_match('/^[a-z2-7]{52}\.b32\.i2p$/', $addr)) return ['status' => 'error', 'message' => 'Bad addr'];
+      $tok = bin2hex(random_bytes(16));
+      $s[$user] = ['addr' => $addr, 'tok' => $tok, 'upd' => time(), 'ip' => $ip];
+      return ['status' => 'success', 'session_token' => $tok];
+
+    case 'update_address':
+      $tok = (string)($d['session_token'] ?? '');
+      $addr = trim((string)($d['address'] ?? ''));
+      if (!$addr || !preg_match('/^[a-z2-7]{52}\.b32\.i2p$/', $addr)) return ['status' => 'error', 'message' => 'Bad addr'];
+      foreach ($s as &$i) {
+        if (isset($i['tok']) && hash_equals((string)$i['tok'], $tok)) {
+          $i['addr'] = $addr;
+          $i['upd'] = time();
+          return ['status' => 'success', 'message' => 'Updated'];
         }
-    }
+      }
+      return ['status' => 'error', 'message' => 'Not found'];
 
-    if (!isset($state[$ip])) {
-        $state[$ip] = [
-            'window_start' => $now,
-            'count' => 0,
-            'failed_logins' => 0,
-            'blocked_until' => 0,
-        ];
-    }
+    case 'lookup':
+      $tok = (string)($d['session_token'] ?? '');
+      $tgt = trim((string)($d['target'] ?? ''));
+      if (!$tgt || !preg_match('/^[a-zA-Z0-9_\-]+$/', $tgt)) return ['status' => 'error', 'message' => 'Bad user'];
+      $found = false;
+      foreach ($s as $u => $i) {
+        if (hash_equals((string)($i['tok'] ?? ''), $tok)) {$found = true; break;}
+      }
+      if (!$found) return ['status' => 'error', 'message' => 'Bad token'];
+      if (!isset($s[$tgt]) || !$s[$tgt]['addr']) return ['status' => 'error', 'message' => 'Offline'];
+      $s[$tgt]['upd'] = time();
+      return ['status' => 'success', 'address' => $s[$tgt]['addr']];
 
-    $entry = &$state[$ip];
-    if (!empty($entry['blocked_until']) && (int)$entry['blocked_until'] > $now) {
-        saveJsonFile($authStateFile, $state);
-        return ['status' => 'error', 'message' => 'IP-adres is tijdelijk geblokkeerd wegens misbruik.'];
-    }
+    case 'verify_session':
+      $tok = (string)($d['session_token'] ?? '');
+      $user = trim((string)($d['username'] ?? ''));
+      if (!$user || !preg_match('/^[a-zA-Z0-9_\-]+$/', $user)) return ['status' => 'error', 'message' => 'Bad user'];
+      if (!isset($s[$user]) || !hash_equals((string)($s[$user]['tok'] ?? ''), $tok)) return ['status' => 'error', 'message' => 'Bad token'];
+      return ['status' => 'success', 'message' => 'Valid'];
 
-    if (($now - (int)$entry['window_start']) >= 60) {
-        $entry['window_start'] = $now;
-        $entry['count'] = 0;
-    }
-
-    $entry['count'] = ((int)$entry['count']) + 1;
-    if ((int)$entry['count'] > 60) {
-        $entry['blocked_until'] = $now + 60;
-        saveJsonFile($authStateFile, $state);
-        return ['status' => 'error', 'message' => 'Te veel verzoeken. Probeer over 1 minuut opnieuw.'];
-    }
-
-    saveJsonFile($authStateFile, $state);
-    return null;
+    default:
+      return ['status' => 'error', 'message' => 'Unknown action'];
+  }
 }
 
-function recordLoginResult(string $ip, bool $success, string $authStateFile, string $username = ''): void {
-    $state = loadJsonFile($authStateFile, []);
-    $now = time();
-
-    if (!isset($state[$ip])) {
-        $state[$ip] = [
-            'window_start' => $now,
-            'count' => 0,
-            'failed_logins' => 0,
-            'blocked_until' => 0,
-        ];
-    }
-
-    if ($success) {
-        $state[$ip]['failed_logins'] = 0;
-    } else {
-        $failed = (int)($state[$ip]['failed_logins'] ?? 0) + 1;
-        $state[$ip]['failed_logins'] = $failed;
-        if ($failed >= 5) {
-            $state[$ip]['blocked_until'] = $now + 900;
-            $state[$ip]['failed_logins'] = 0;
-            serverLog("[$ip] [HACK POGING] Brute-force gedetecteerd voor gebruiker: $username. IP geblokkeerd voor 15 minuten.");
-        }
-    }
-
-    saveJsonFile($authStateFile, $state);
-}
-
-function valideerSessie(string $token, array $sessies): bool {
-    foreach ($sessies as $info) {
-        if (isset($info['token']) && hash_equals((string)$info['token'], $token)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-function verwerkActie(array $data, string $ip, array &$gebruikers, array &$sessies): array {
-    // Hack-detectie op gebruikersnaam (indien aanwezig)
-    if (isset($data['username'])) {
-        $checkUser = trim((string)$data['username']);
-        if ($checkUser !== '' && !preg_match('/^[a-zA-Z0-9_\-]+$/', $checkUser)) {
-            serverLog("[$ip] [HACK POGING] Verdachte/ongeldige tekens in gebruikersnaam: '$checkUser'");
-            return ['status' => 'error', 'message' => 'Gebruikersnaam bevat ongeldige tekens'];
-        }
-    }
-
-    // Hack-detectie op session_token (indien aanwezig)
-    if (isset($data['session_token'])) {
-        $checkToken = trim((string)$data['session_token']);
-        if ($checkToken !== '' && !preg_match('/^[0-9a-fA-F]{32}$/', $checkToken)) {
-            serverLog("[$ip] [HACK POGING] Ongeldig sessietoken formaat gedetecteerd: '$checkToken'");
-            return ['status' => 'error', 'message' => 'Ongeldig sessietoken'];
-        }
-    }
-
-    // Hack-detectie op address (indien aanwezig)
-    if (isset($data['address'])) {
-        $checkAddress = trim((string)$data['address']);
-        if ($checkAddress !== '' && preg_match('/[\'"<>;()\\$]/', $checkAddress)) {
-            serverLog("[$ip] [HACK POGING] Mogelijk injectie-payload in adres gedetecteerd: '$checkAddress'");
-            return ['status' => 'error', 'message' => 'Ongeldig adresformaat'];
-        }
-    }
-
-    if (!isset($data['action'])) {
-        return ['status' => 'error', 'message' => 'Ongeldig verzoekformaat'];
-    }
-
-    $actie = (string)$data['action'];
-
-    switch ($actie) {
-        case 'register':
-            $user = trim((string)($data['username'] ?? ''));
-            $pass = (string)($data['password'] ?? '');
-
-            if ($user === '' || $pass === '') {
-                return ['status' => 'error', 'message' => 'Gebruikersnaam en wachtwoord zijn verplicht'];
-            }
-
-            if (strlen($user) < 3 || strlen($user) > 32) {
-                return ['status' => 'error', 'message' => 'Gebruikersnaam moet tussen 3 en 32 tekens bevatten'];
-            }
-
-            $gereserveerd = ['admin', 'root', 'system', 'anonymous', 'administrator', 'nexus', 'server', 'directory'];
-            if (in_array(strtolower($user), $gereserveerd, true)) {
-                return ['status' => 'error', 'message' => 'Gereserveerde gebruikersnaam is niet toegestaan'];
-            }
-
-            if (isset($gebruikers[$user])) {
-                return ['status' => 'error', 'message' => 'Gebruikersnaam bestaat al'];
-            }
-
-            $gebruikers[$user] = password_hash($pass, PASSWORD_BCRYPT);
-            return ['status' => 'success', 'message' => 'Account aangemaakt'];
-
-        case 'login':
-            $user = trim((string)($data['username'] ?? ''));
-            $pass = (string)($data['password'] ?? '');
-            $adres = trim((string)($data['address'] ?? ''));
-
-            $dummyHash = '$2y$10$reZ1lKex5oG1U1W1E1E1Eu1V1E1E1E1E1E1E1E1E1E1E1E1E1E1E1';
-            $userExists = isset($gebruikers[$user]);
-            $hashToVerify = $userExists ? (string)$gebruikers[$user] : $dummyHash;
-
-            if (!password_verify($pass, $hashToVerify) || !$userExists) {
-                serverLog("[$ip] Mislukte inlogpoging voor: $user");
-                return ['status' => 'error', 'message' => 'Ongeldige inloggegevens'];
-            }
-
-            if ($adres !== '' && !preg_match('/^[a-z2-7]{52}\.b32\.i2p$/', $adres)) {
-                serverLog("[$ip] [HACK POGING] Update adres mislukt: adres is leeg of is geen geldig I2P Base32 adres: '$adres'");
-                return ['status' => 'error', 'message' => 'Ongeldig I2P-adres formaat'];
-            }
-
-            $token = bin2hex(random_bytes(16));
-            $sessies[$user] = [
-                'address' => $adres,
-                'token' => $token,
-                'updated_at' => time(),
-                'ip' => $ip,
-            ];
-
-            return [
-                'status' => 'success',
-                'session_token' => $token,
-            ];
-
-        case 'update_address':
-            $mijnToken = (string)($data['session_token'] ?? '');
-            $adres = trim((string)($data['address'] ?? ''));
-
-            if (!valideerSessie($mijnToken, $sessies)) {
-                return ['status' => 'error', 'message' => 'Sessie is ongeldig of verlopen'];
-            }
-
-            if ($adres === '' || !preg_match('/^[a-z2-7]{52}\.b32\.i2p$/', $adres)) {
-                serverLog("[$ip] [HACK POGING] Update adres mislukt: adres is leeg of is geen geldig I2P Base32 adres: '$adres'");
-                return ['status' => 'error', 'message' => 'Geldig I2P Base32 adres (.b32.i2p) is verplicht'];
-            }
-
-            foreach ($sessies as &$info) {
-                if (isset($info['token']) && hash_equals((string)$info['token'], $mijnToken)) {
-                    $info['address'] = $adres;
-                    $info['updated_at'] = time();
-                    return ['status' => 'success', 'message' => 'Adres succesvol bijgewerkt'];
-                }
-            }
-            unset($info);
-
-            return ['status' => 'error', 'message' => 'Sessie niet gevonden'];
-
-        case 'lookup':
-            $mijnToken = (string)($data['session_token'] ?? '');
-            $doelGebruiker = trim((string)($data['target'] ?? ''));
-
-            if ($doelGebruiker === '' || !preg_match('/^[a-zA-Z0-9_\-]+$/', $doelGebruiker)) {
-                return ['status' => 'error', 'message' => 'Gebruikersnaam bevat ongeldige tekens'];
-            }
-
-            if (!valideerSessie($mijnToken, $sessies)) {
-                return ['status' => 'error', 'message' => 'Sessie is ongeldig of verlopen'];
-            }
-
-            if (!isset($sessies[$doelGebruiker]) || empty($sessies[$doelGebruiker]['address'])) {
-                return ['status' => 'error', 'message' => "Gebruiker '$doelGebruiker' is offline of I2P is nog niet gereed"];
-            }
-
-            $sessies[$doelGebruiker]['updated_at'] = time();
-
-            return [
-                'status' => 'success',
-                'address' => $sessies[$doelGebruiker]['address'],
-            ];
-
-        case 'verify_session':
-            $mijnToken = (string)($data['session_token'] ?? '');
-            $checkGebruiker = trim((string)($data['username'] ?? ''));
-
-            if ($checkGebruiker === '' || !preg_match('/^[a-zA-Z0-9_\-]+$/', $checkGebruiker)) {
-                serverLog("[$ip] [HACK POGING] Sessie verificatie mislukt: gebruikersnaam bevat ongeldige tekens: '$checkGebruiker'");
-                return ['status' => 'error', 'message' => 'Gebruikersnaam bevat ongeldige tekens'];
-            }
-
-            if (!valideerSessie($mijnToken, $sessies)) {
-                serverLog("[$ip] [HACK POGING] Sessie verificatie mislukt: token '$mijnToken' is ongeldig of verlopen voor gebruiker '$checkGebruiker'");
-                return ['status' => 'error', 'message' => 'Sessie is ongeldig of verlopen'];
-            }
-
-            // Check if token belongs to the given username
-            if (!isset($sessies[$checkGebruiker]) || !hash_equals((string)$sessies[$checkGebruiker]['token'], $mijnToken)) {
-                serverLog("[$ip] [HACK POGING] Sessie verificatie mislukt: token '$mijnToken' komt niet overeen met gebruiker '$checkGebruiker'");
-                return ['status' => 'error', 'message' => 'Sessie komt niet overeen met gebruiker'];
-            }
-
-            return ['status' => 'success', 'message' => 'Sessie is geldig'];
-
-        case 'report_offline':
-            $mijnToken = (string)($data['session_token'] ?? '');
-            $doelGebruiker = trim((string)($data['target'] ?? ''));
-
-            if ($doelGebruiker === '' || !preg_match('/^[a-zA-Z0-9_\-]+$/', $doelGebruiker)) {
-                return ['status' => 'error', 'message' => 'Gebruikersnaam bevat ongeldige tekens'];
-            }
-
-            if (!valideerSessie($mijnToken, $sessies)) {
-                return ['status' => 'error', 'message' => 'Sessie is ongeldig of verlopen'];
-            }
-
-            // Beveiliging: Alleen de gebruiker zelf mag zijn eigen sessie offline melden
-            if (isset($sessies[$doelGebruiker])) {
-                if (!hash_equals((string)$sessies[$doelGebruiker]['token'], $mijnToken)) {
-                    serverLog("[$ip] [HACK POGING] Ongeautoriseerde poging om gebruiker '$doelGebruiker' offline te melden.");
-                    return ['status' => 'error', 'message' => 'Ongeautoriseerd'];
-                }
-                unset($sessies[$doelGebruiker]);
-                serverLog("[$ip] Gebruiker '$doelGebruiker' offline gemeld.");
-            }
-
-            return ['status' => 'success', 'message' => 'Gebruiker offline gemeld en verwijderd'];
-
-        default:
-            return ['status' => 'error', 'message' => 'Onbekende actie'];
-    }
-}
-
-// ---------------------------
-// Web mode: hosted JSON API
-// ---------------------------
 if (PHP_SAPI !== 'cli') {
-    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+  $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+  $m = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
-    $lockFile = $dataDir . '/db.lock';
-    $lockFp = fopen($lockFile, 'c');
-    if ($lockFp) {
-        flock($lockFp, LOCK_EX);
-    }
+  $lf = $dDir . '/db.lock';
+  $lfp = fopen($lf, 'c');
+  if ($lfp) flock($lfp, LOCK_EX);
 
-    $rateError = enforceRateLimit($ip, $authStateFile);
-    if ($rateError !== null) {
-        releaseDbLock($lockFp);
-        jsonResponse($rateError, 429);
-        exit;
-    }
-
-    if ($method !== 'POST') {
-        releaseDbLock($lockFp);
-        jsonResponse([
-            'status' => 'error',
-            'message' => 'Gebruik POST met JSON payload.'
-        ], 405);
-        exit;
-    }
-
-    $raw = file_get_contents('php://input');
-    if ($raw !== false && strlen($raw) > 8192) {
-        releaseDbLock($lockFp);
-        jsonResponse(['status' => 'error', 'message' => 'Payload te groot'], 413);
-        exit;
-    }
-    $data = json_decode($raw ?? '', true);
-
-    if (!is_array($data)) {
-        serverLog("[$ip] [HACK POGING] Ongeldige JSON-payload of HTTP-probe ontvangen: " . json_encode($raw));
-        releaseDbLock($lockFp);
-        jsonResponse(['status' => 'error', 'message' => 'Ongeldig JSON-formaat'], 400);
-        exit;
-    }
-
-    $gebruikers = loadJsonFile($userDbFile, []);
-    $sessies = loadJsonFile($sessionDbFile, []);
-
-    // Verwijder inactieve sessies (3 minuten)
-    $now = time();
-    foreach ($sessies as $user => $info) {
-        $updatedAt = isset($info['updated_at']) ? (int)$info['updated_at'] : 0;
-        if ($updatedAt > 0 && ($now - $updatedAt) > 180) {
-            unset($sessies[$user]);
-        }
-    }
-
-    $response = verwerkActie($data, $ip, $gebruikers, $sessies);
-
-    $actie = isset($data['action']) ? (string)$data['action'] : '';
-    if ($actie === 'login') {
-        $user = trim((string)($data['username'] ?? ''));
-        recordLoginResult($ip, (($response['status'] ?? 'error') === 'success'), $authStateFile, $user);
-    }
-
-    saveJsonFile($userDbFile, $gebruikers);
-    saveJsonFile($sessionDbFile, $sessies);
-
-    releaseDbLock($lockFp);
-    jsonResponse($response, $response['status'] === 'success' ? 200 : 400);
+  $rl = chkLim($ip, $aDb);
+  if ($rl) {
+    if ($lfp) {flock($lfp, LOCK_UN); fclose($lfp);}
+    jres($rl, 429);
     exit;
+  }
+
+  if ($m !== 'POST') {
+    if ($lfp) {flock($lfp, LOCK_UN); fclose($lfp);}
+    jres(['status' => 'error', 'message' => 'POST only'], 405);
+    exit;
+  }
+
+  $raw = file_get_contents('php://input');
+  if (strlen($raw) > 8192) {
+    if ($lfp) {flock($lfp, LOCK_UN); fclose($lfp);}
+    jres(['status' => 'error', 'message' => 'Too large'], 413);
+    exit;
+  }
+
+  $d = json_decode($raw, true);
+  if (!is_array($d)) {
+    if ($lfp) {flock($lfp, LOCK_UN); fclose($lfp);}
+    jres(['status' => 'error', 'message' => 'Bad JSON'], 400);
+    exit;
+  }
+
+  $u = ld($uDb, []);
+  $s = ld($sDb, []);
+
+  $t = time();
+  foreach ($s as $usr => $i) {
+    $upd = isset($i['upd']) ? (int)$i['upd'] : 0;
+    if ($upd > 0 && ($t - $upd) > 180) unset($s[$usr]);
+  }
+
+  $res = procAct($d, $ip, $u, $s);
+
+  sv($uDb, $u);
+  sv($sDb, $s);
+
+  if ($lfp) {flock($lfp, LOCK_UN); fclose($lfp);}
+  jres($res, $res['status'] === 'success' ? 200 : 400);
+  exit;
 }
 
-// ---------------------------------
-// CLI mode: legacy socket auth node
-// ---------------------------------
-if (!extension_loaded('sockets')) {
-    fwrite(STDERR, "PHP sockets extensie ontbreekt in CLI mode.\n");
-    exit(1);
-}
+if (!extension_loaded('sockets')) {die("Need sockets ext\n");}
 
-$poort = isset($argv[1]) ? (int)$argv[1] : 8000;
-$actieveSessies = [];
-
-$server = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-if ($server === false) {
-    die("Kan socket niet maken: " . socket_strerror(socket_last_error()) . "\n");
-}
-
-socket_set_option($server, SOL_SOCKET, SO_REUSEADDR, 1);
-
-if (socket_bind($server, '0.0.0.0', $poort) === false) {
-    die("Kan socket niet binden op poort $poort: " . socket_strerror(socket_last_error($server)) . "\n");
-}
-
-if (socket_listen($server, 10) === false) {
-    die("Kan niet luisteren op socket: " . socket_strerror(socket_last_error($server)) . "\n");
-}
-
-echo "Centrale PHP Directory Server gestart op poort $poort...\n";
+$port = isset($argv[1]) ? (int)$argv[1] : 8000;
+$srv = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+if (!$srv) die("Create failed\n");
+socket_set_option($srv, SOL_SOCKET, SO_REUSEADDR, 1);
+if (!socket_bind($srv, '0.0.0.0', $port)) die("Bind failed\n");
+if (!socket_listen($srv, 10)) die("Listen failed\n");
+echo "Listening on 0.0.0.0:$port\n";
 
 while (true) {
-    $clientSocket = socket_accept($server);
-    if ($clientSocket === false) {
-        continue;
+  $c = socket_accept($srv);
+  if (!$c) continue;
+  $ip = '';
+  socket_getpeername($c, $ip);
+  $buf = '';
+  while (strlen($buf) < 8192) {
+    $d = socket_read($c, 4096);
+    if (!$d || $d === false) break;
+    $buf .= $d;
+    $nl = strpos($buf, "\n");
+    if ($nl !== false) {
+      $ln = substr($buf, 0, $nl);
+      $data = json_decode($ln, true);
+      $res = is_array($data) ? procAct($data, $ip, $u, $s) : ['status' => 'error'];
+      socket_write($c, json_encode($res) . "\n");
+      break;
     }
-
-    socket_getpeername($clientSocket, $clientIp);
-    socket_set_option($clientSocket, SOL_SOCKET, SO_RCVTIMEO, ['sec' => 5, 'usec' => 0]);
-    socket_set_option($clientSocket, SOL_SOCKET, SO_SNDTIMEO, ['sec' => 5, 'usec' => 0]);
-
-    try {
-        behandelVerbinding($clientSocket, (string)$clientIp, $userDbFile, $actieveSessies);
-    } catch (Exception $e) {
-        echo "Fout bij afhandeling: " . $e->getMessage() . "\n";
-        socket_close($clientSocket);
-    }
+  }
+  socket_close($c);
 }
-
-function behandelVerbinding(mixed $socket, string $ip, string $dbFile, array &$sessies): void {
-    global $authStateFile;
-    global $dataDir;
-
-    // Verwijder inactieve sessies (3 minuten) om memory leaks te voorkomen
-    $now = time();
-    foreach ($sessies as $user => $info) {
-        $updatedAt = isset($info['updated_at']) ? (int)$info['updated_at'] : 0;
-        if ($updatedAt > 0 && ($now - $updatedAt) > 180) {
-            unset($sessies[$user]);
-        }
-    }
-
-    $lockFile = $dataDir . '/db.lock';
-    $lockFp = fopen($lockFile, 'c');
-    if ($lockFp) {
-        flock($lockFp, LOCK_EX);
-    }
-
-    $rateError = enforceRateLimit($ip, $authStateFile);
-    if ($rateError !== null) {
-        releaseDbLock($lockFp);
-        stuurAntwoord($socket, $rateError);
-        socket_close($socket);
-        return;
-    }
-
-    $verzoek = leesRegel($socket);
-    if ($verzoek === false) {
-        releaseDbLock($lockFp);
-        socket_close($socket);
-        return;
-    }
-
-    $data = json_decode($verzoek, true);
-    if (!is_array($data)) {
-        serverLog("[$ip] [HACK POGING] Ongeldige JSON-payload of HTTP-probe ontvangen: " . json_encode($verzoek));
-        releaseDbLock($lockFp);
-        stuurAntwoord($socket, ['status' => 'error', 'message' => 'Ongeldig JSON-formaat']);
-        socket_close($socket);
-        return;
-    }
-
-    $gebruikers = loadJsonFile($dbFile, []);
-    $response = verwerkActie($data, $ip, $gebruikers, $sessies);
-    saveJsonFile($dbFile, $gebruikers);
-
-    $actie = isset($data['action']) ? (string)$data['action'] : '';
-    if ($actie === 'login') {
-        $user = trim((string)($data['username'] ?? ''));
-        recordLoginResult($ip, (($response['status'] ?? 'error') === 'success'), $authStateFile, $user);
-    }
-
-    releaseDbLock($lockFp);
-    stuurAntwoord($socket, $response);
-    socket_close($socket);
-}
-
-function leesRegel(mixed $socket): string|false {
-    $buffer = '';
-    $maxLen = 4096;
-
-    while (strlen($buffer) < $maxLen) {
-        $chunk = @socket_read($socket, 1024);
-        if ($chunk === false || $chunk === '') {
-            return false;
-        }
-
-        $buffer .= $chunk;
-        $nlPos = strpos($buffer, "\n");
-        if ($nlPos !== false) {
-            return substr($buffer, 0, $nlPos);
-        }
-    }
-
-    return false;
-}
-
-function stuurAntwoord(mixed $socket, array $data): void {
-    $res = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
-    @socket_write($socket, $res);
-}
-?>

@@ -1,716 +1,391 @@
-// ── Session Token Interceptor ─────────────────────────────────────────────
-// Read the per-session token injected by the Rust launcher via the meta tag.
-// Intercept all fetch() calls to /api/* and attach the X-Session-Token header.
-(function() {
-  'use strict';
+(() => {
   const meta = document.querySelector('meta[name="x-session-token"]');
-  const SESSION_TOKEN = meta ? meta.getAttribute('content') : null;
-
-  // If no valid token found, the page was not opened by the launcher — lock down immediately
-  if (!SESSION_TOKEN || SESSION_TOKEN === '__SESSION_TOKEN_PLACEHOLDER__' || SESSION_TOKEN.length !== 64) {
+  const TOKEN = meta ? meta.getAttribute('content') : null;
+  if (!TOKEN || TOKEN === '__SESSION_TOKEN_PLACEHOLDER__' || TOKEN.length !== 64) {
     document.body.innerHTML = '';
     document.title = '';
     return;
   }
-
-  // Expose token for non-fetch flows that still need authenticated calls.
-  window.__NEXUS_SESSION_TOKEN = SESSION_TOKEN;
-
-  // Intercept window.fetch to automatically attach the session token header
-  const _originalFetch = window.fetch.bind(window);
+  window.__NEXUS_SESSION_TOKEN = TOKEN;
+  const origFetch = window.fetch.bind(window);
   window.fetch = function(resource, options) {
     const url = typeof resource === 'string' ? resource : (resource.url || '');
     if (url.startsWith('/api/') || url.includes('127.0.0.1') || url.includes('localhost')) {
       options = options || {};
-      options.headers = Object.assign({}, options.headers || {}, {
-        'X-Session-Token': SESSION_TOKEN
-      });
+      options.headers = Object.assign({}, options.headers || {}, {'X-Session-Token': TOKEN});
     }
-    return _originalFetch(resource, options);
+    return origFetch(resource, options);
   };
 })();
 
-// State Management
-let selectedFile = null;
-let isNodeInitialized = false;
-let logOffset = 0;
-let statusIntervalId = null;
+let file = null, init = false, logOff = 0, statusInt = null, theme = localStorage.getItem('theme') || 'light';
+if (theme === 'dark') {document.body.classList.add('dark-mode'); document.getElementById('btn-theme-toggle').textContent = 'LIGHT';}
 
-// Hardcoded Default Connection Values for simplicity
-const DEFAULT_HOST = '127.0.0.1';
-const DEFAULT_PORT = 8000;
-const DEFAULT_LISTEN_PORT = 9090;
+const DOM = {};
+['tab-login-trigger', 'tab-register-trigger', 'login-form', 'register-form', 'auth-card', 'transfer-card', 'status-dot', 'status-label',
+  'address-banner-section', 'my-address-text', 'btn-copy-address', 'console-output', 'btn-clear-logs', 'btn-refresh-files', 'files-table-body',
+  'file-dropzone', 'transfer-file-input', 'selected-file-details', 'selected-file-name', 'selected-file-size', 'btn-clear-file',
+  'transfer-form', 'btn-send-submit', 'btn-shutdown-node', 'btn-theme-toggle', 'btn-logout', 'transfers-card', 'transfers-list',
+  'loading-overlay', 'loading-status-text'].forEach(id => DOM[id] = document.getElementById(id));
 
-// DOM Elements
-const tabLogin = document.getElementById('tab-login-trigger');
-const tabRegister = document.getElementById('tab-register-trigger');
-const loginForm = document.getElementById('login-form');
-const registerForm = document.getElementById('register-form');
-const authCard = document.getElementById('auth-card');
-const transferCard = document.getElementById('transfer-card');
-const statusDot = document.getElementById('status-dot');
-const statusLabel = document.getElementById('status-label');
-const addressBanner = document.getElementById('address-banner-section');
-const myAddressText = document.getElementById('my-address-text');
-const btnCopyAddress = document.getElementById('btn-copy-address');
-const consoleOutput = document.getElementById('console-output');
-const btnClearLogs = document.getElementById('btn-clear-logs');
-const btnRefreshFiles = document.getElementById('btn-refresh-files');
-const filesTableBody = document.getElementById('files-table-body');
-const dropzone = document.getElementById('file-dropzone');
-const fileInput = document.getElementById('transfer-file-input');
-const selectedFileDetails = document.getElementById('selected-file-details');
-const selectedFileName = document.getElementById('selected-file-name');
-const selectedFileSize = document.getElementById('selected-file-size');
-const btnClearFile = document.getElementById('btn-clear-file');
-const transferForm = document.getElementById('transfer-form');
-const btnSendSubmit = document.getElementById('btn-send-submit');
-const btnShutdownNode = document.getElementById('btn-shutdown-node');
-const btnThemeToggle = document.getElementById('btn-theme-toggle');
-const btnLogout = document.getElementById('btn-logout');
-
-// --- Dark Mode / Light Mode toggle ---
-const savedTheme = localStorage.getItem('theme') || 'light';
-if (savedTheme === 'dark') {
-  document.body.classList.add('dark-mode');
-  btnThemeToggle.textContent = 'LIGHT MODE';
-} else {
-  document.body.classList.remove('dark-mode');
-  btnThemeToggle.textContent = 'DARK MODE';
-}
-
-btnThemeToggle.addEventListener('click', () => {
+document.getElementById('btn-theme-toggle').addEventListener('click', () => {
   if (document.body.classList.contains('dark-mode')) {
     document.body.classList.remove('dark-mode');
-    btnThemeToggle.textContent = 'DARK MODE';
+    document.getElementById('btn-theme-toggle').textContent = 'DARK';
     localStorage.setItem('theme', 'light');
   } else {
     document.body.classList.add('dark-mode');
-    btnThemeToggle.textContent = 'LIGHT MODE';
+    document.getElementById('btn-theme-toggle').textContent = 'LIGHT';
     localStorage.setItem('theme', 'dark');
   }
 });
 
-// --- Tab Navigation ---
-tabLogin.addEventListener('click', () => {
-  tabLogin.classList.add('active');
-  tabRegister.classList.remove('active');
-  loginForm.style.display = 'block';
-  registerForm.style.display = 'none';
+DOM['tab-login-trigger'].addEventListener('click', () => {
+  DOM['tab-login-trigger'].classList.add('active');
+  DOM['tab-register-trigger'].classList.remove('active');
+  DOM['login-form'].style.display = 'block';
+  DOM['register-form'].style.display = 'none';
 });
 
-tabRegister.addEventListener('click', () => {
-  tabRegister.classList.add('active');
-  tabLogin.classList.remove('active');
-  registerForm.style.display = 'block';
-  loginForm.style.display = 'none';
+DOM['tab-register-trigger'].addEventListener('click', () => {
+  DOM['tab-register-trigger'].classList.add('active');
+  DOM['tab-login-trigger'].classList.remove('active');
+  DOM['register-form'].style.display = 'block';
+  DOM['login-form'].style.display = 'none';
 });
 
-// --- Utility: Log Writer ---
-function addLocalLog(message, type = 'system') {
+function log(msg, type = 'sys') {
   const line = document.createElement('div');
   line.className = `log-line ${type}-line`;
-  const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
-  line.textContent = `[${timestamp}] [${type.toUpperCase()}] ${message}`;
-  consoleOutput.appendChild(line);
-  consoleOutput.scrollTop = consoleOutput.scrollHeight;
+  const ts = new Date().toISOString().split('T')[1].slice(0, 8);
+  line.textContent = `[${ts}] [${type.toUpperCase()}] ${msg}`;
+  DOM['console-output'].appendChild(line);
+  DOM['console-output'].scrollTop = DOM['console-output'].scrollHeight;
 }
 
-// --- Clipboard Copy ---
-btnCopyAddress.addEventListener('click', () => {
-  navigator.clipboard.writeText(myAddressText.textContent)
-    .then(() => {
-      const originalText = btnCopyAddress.textContent;
-      btnCopyAddress.textContent = 'COPIED';
-      setTimeout(() => btnCopyAddress.textContent = originalText, 1500);
-    })
-    .catch(err => addLocalLog('Failed to copy: ' + err, 'error'));
+DOM['btn-copy-address'].addEventListener('click', () => {
+  navigator.clipboard.writeText(DOM['my-address-text'].textContent).then(() => {
+    const orig = DOM['btn-copy-address'].textContent;
+    DOM['btn-copy-address'].textContent = 'COPIED';
+    setTimeout(() => DOM['btn-copy-address'].textContent = orig, 1500);
+  }).catch(e => log('Copy failed: ' + e, 'error'));
 });
 
-// --- Drag and Drop Interface ---
-dropzone.addEventListener('click', (e) => {
-  if (e.target === fileInput) return;
-  fileInput.click();
-});
-
-dropzone.addEventListener('dragover', (e) => {
+DOM['file-dropzone'].addEventListener('click', () => DOM['transfer-file-input'].click());
+DOM['file-dropzone'].addEventListener('dragover', (e) => {e.preventDefault(); DOM['file-dropzone'].style.borderStyle = 'solid';});
+DOM['file-dropzone'].addEventListener('dragleave', () => DOM['file-dropzone'].style.borderStyle = 'dashed');
+DOM['file-dropzone'].addEventListener('drop', (e) => {
   e.preventDefault();
-  dropzone.style.borderStyle = 'solid';
+  DOM['file-dropzone'].style.borderStyle = 'dashed';
+  if (e.dataTransfer.files.length > 0) selectFile(e.dataTransfer.files[0]);
 });
+DOM['transfer-file-input'].addEventListener('change', () => {if (DOM['transfer-file-input'].files.length > 0) selectFile(DOM['transfer-file-input'].files[0]);});
 
-dropzone.addEventListener('dragleave', () => {
-  dropzone.style.borderStyle = 'dashed';
-});
-
-dropzone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  dropzone.style.borderStyle = 'dashed';
-  if (e.dataTransfer.files.length > 0) {
-    handleFileSelection(e.dataTransfer.files[0]);
-  }
-});
-
-fileInput.addEventListener('change', () => {
-  if (fileInput.files.length > 0) {
-    handleFileSelection(fileInput.files[0]);
-  }
-});
-
-function handleFileSelection(file) {
-  const filenameRegex = /^[a-zA-Z0-9_\-\. ]+$/;
-  if (!filenameRegex.test(file.name)) {
-    addLocalLog(`Bestand geweigerd: De bestandsnaam '${file.name}' bevat ongeldige tekens. Alleen letters, cijfers, underscores (_), streepjes (-), punten (.) en spaties zijn toegestaan.`, 'error');
-    alert(`Bestand geweigerd: De bestandsnaam '${file.name}' bevat ongeldige tekens.\n\nAlleen letters, cijfers, underscores (_), streepjes (-), punten (.) en spaties zijn toegestaan.`);
-    clearSelectedFile();
+function selectFile(f) {
+  const re = /^[a-zA-Z0-9_\-\. ]+$/;
+  if (!re.test(f.name)) {
+    log(`Bad filename: '${f.name}'`, 'error');
+    alert(`Bad filename: '${f.name}'\n\nOnly letters, numbers, _, -, . allowed.`);
+    clrFile();
     return;
   }
-  selectedFile = file;
-  selectedFileName.textContent = file.name;
-  
-  // Format File Size
-  const sizeKB = file.size / 1024;
-  if (sizeKB < 1024) {
-    selectedFileSize.textContent = `${sizeKB.toFixed(1)} KB`;
-  } else {
-    selectedFileSize.textContent = `${(sizeKB / 1024).toFixed(1)} MB`;
-  }
-
-  selectedFileDetails.style.display = 'flex';
-  btnSendSubmit.removeAttribute('disabled');
+  file = f;
+  DOM['selected-file-name'].textContent = f.name;
+  const sizeKB = f.size / 1024;
+  DOM['selected-file-size'].textContent = sizeKB < 1024 ? `${sizeKB.toFixed(1)} KB` : `${(sizeKB / 1024).toFixed(1)} MB`;
+  DOM['selected-file-details'].style.display = 'flex';
+  DOM['btn-send-submit'].removeAttribute('disabled');
 }
 
-btnClearFile.addEventListener('click', (e) => {
-  e.stopPropagation();
-  clearSelectedFile();
-});
+DOM['btn-clear-file'].addEventListener('click', (e) => {e.stopPropagation(); clrFile();});
+function clrFile() {file = null; DOM['transfer-file-input'].value = ''; DOM['selected-file-details'].style.display = 'none'; DOM['btn-send-submit'].setAttribute('disabled', 'true');}
 
-function clearSelectedFile() {
-  selectedFile = null;
-  fileInput.value = '';
-  selectedFileDetails.style.display = 'none';
-  btnSendSubmit.setAttribute('disabled', 'true');
-}
-
-async function downloadReceivedFile(filename) {
+async function dlFile(fn) {
   try {
-    const response = await fetch(`/api/download?file=${encodeURIComponent(filename)}`);
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Download geweigerd (${response.status}): ${errorText.slice(0, 120)}`);
-    }
-
-    const blob = await response.blob();
+    const res = await fetch(`/api/download?file=${encodeURIComponent(fn)}`);
+    if (!res.ok) throw new Error(`Download failed (${res.status})`);
+    const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = filename;
+    a.download = fn;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    addLocalLog(`Download gestart voor '${filename}'.`, 'system');
-  } catch (err) {
-    addLocalLog(`Download mislukt voor '${filename}': ${err.message}`, 'error');
-  }
+    log(`Downloaded '${fn}'`, 'sys');
+  } catch (e) {log(`Download failed: ${e.message}`, 'error');}
 }
 
-// --- API Requests ---
-
-// Register User
-registerForm.addEventListener('submit', async (e) => {
+DOM['register-form'].addEventListener('submit', async (e) => {
   e.preventDefault();
-  const username = document.getElementById('register-username').value.trim();
-  const password = document.getElementById('register-password').value;
-  
-  const submitBtn = document.getElementById('btn-register-submit');
-  submitBtn.setAttribute('disabled', 'true');
-  submitBtn.textContent = 'REGISTERING...';
-  
-  addLocalLog(`Registering user '${username}' on directory server...`, 'system');
-
+  const u = document.getElementById('register-username').value.trim();
+  const p = document.getElementById('register-password').value;
+  const btn = document.getElementById('btn-register-submit');
+  btn.setAttribute('disabled', 'true');
+  btn.textContent = 'REGISTERING...';
+  log(`Registering '${u}'...`, 'sys');
   try {
-    const response = await fetch('/api/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username,
-        password
-      })
-    });
-    
-    const result = await response.json();
-    if (response.ok && result.status === 'success') {
-      addLocalLog(`Successfully registered user '${username}'. Please switch to LOGIN tab.`, 'system');
-      registerForm.reset();
+    const res = await fetch('/api/register', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: u, password: p})});
+    const r = await res.json();
+    if (res.ok && r.status === 'success') {
+      log(`Registered '${u}'. Switch to LOGIN tab.`, 'sys');
+      DOM['register-form'].reset();
     } else {
-      addLocalLog(`Registration failed: ${result.message || 'Unknown error'}`, 'error');
+      log(`Register failed: ${r.message || 'Unknown'}`, 'error');
     }
-  } catch (error) {
-    addLocalLog(`Network failure during registration: ${error.message}`, 'error');
-  } finally {
-    submitBtn.removeAttribute('disabled');
-    submitBtn.textContent = 'REGISTER ACCOUNT';
+  } catch (e) {log(`Register failed: ${e.message}`, 'error');}
+  btn.removeAttribute('disabled');
+  btn.textContent = 'REGISTER';
+});
+
+DOM['login-form'].addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const u = document.getElementById('login-username').value.trim();
+  const p = document.getElementById('login-password').value;
+  const btn = document.getElementById('btn-login-submit');
+  btn.setAttribute('disabled', 'true');
+  btn.textContent = 'LOGGING IN...';
+  log(`Logging in '${u}'...`, 'sys');
+  try {
+    const res = await fetch('/api/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: u, password: p, listenPort: 9090})});
+    const r = await res.json();
+    if (res.ok && r.status === 'success') {
+      enterOnline(u, r.myBase32Address);
+    } else {
+      log(`Login failed: ${r.message || 'Unknown'}`, 'error');
+      btn.removeAttribute('disabled');
+      btn.textContent = 'LOGIN';
+    }
+  } catch (e) {
+    log(`Login failed: ${e.message}`, 'error');
+    btn.removeAttribute('disabled');
+    btn.textContent = 'LOGIN';
   }
 });
 
-// Initialize / Login Node
-loginForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const username = document.getElementById('login-username').value.trim();
-  const password = document.getElementById('login-password').value;
-  
-  const submitBtn = document.getElementById('btn-login-submit');
-  submitBtn.setAttribute('disabled', 'true');
-  submitBtn.textContent = 'LOGGING IN...';
-  
-  addLocalLog(`Logging in user '${username}' on directory server...`, 'system');
-
-  try {
-    const response = await fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username,
-        password,
-        listenPort: DEFAULT_LISTEN_PORT
-      })
-    });
-    
-    const result = await response.json();
-    if (response.ok && result.status === 'success') {
-      enterOnlineState(username, result.myBase32Address);
-    } else {
-      addLocalLog(`Login failed: ${result.message || 'Unknown error'}`, 'error');
-      submitBtn.removeAttribute('disabled');
-      submitBtn.textContent = 'LOGIN';
-    }
-  } catch (error) {
-    addLocalLog(`Network failure during login: ${error.message}`, 'error');
-    submitBtn.removeAttribute('disabled');
-    submitBtn.textContent = 'LOGIN';
-  }
-});
-
-function enterOnlineState(username, myBase32Address) {
-  isNodeInitialized = true;
-  addLocalLog(`Node connection established. Logged in as '${username}'.`, 'system');
-  
-  // Update UI components to online state
-  authCard.style.display = 'none';
-  transferCard.style.display = 'block';
-  statusDot.classList.add('online');
-  statusLabel.textContent = 'ONLINE';
-  btnLogout.style.display = 'inline-flex';
-  
-  // Load Destination Address
-  if (myBase32Address) {
-    myAddressText.textContent = myBase32Address;
-  } else {
-    myAddressText.textContent = 'Starting I2P tunnels...';
-  }
-  addressBanner.style.display = 'flex';
-  
-  // Start polling loop
-  startStatusPolling();
-  loadReceivedFiles();
+function enterOnline(u, addr) {
+  init = true;
+  log(`Node online. Logged in as '${u}'.`, 'sys');
+  DOM['auth-card'].style.display = 'none';
+  DOM['transfer-card'].style.display = 'block';
+  DOM['status-dot'].classList.add('online');
+  DOM['status-label'].textContent = 'ONLINE';
+  DOM['btn-logout'].style.display = 'inline-flex';
+  DOM['my-address-text'].textContent = addr || 'Starting I2P...';
+  DOM['address-banner-section'].style.display = 'flex';
+  startPoll();
+  loadFiles();
 }
 
-function enterOfflineState() {
-  isNodeInitialized = false;
-
-  // Reset UI components to offline state
-  authCard.style.display = 'block';
-  transferCard.style.display = 'none';
-  document.getElementById('transfers-card').style.display = 'none';
-  statusDot.classList.remove('online');
-  statusLabel.textContent = 'OFFLINE';
-  btnLogout.style.display = 'none';
-  
-  // Clear address banner
-  addressBanner.style.display = 'none';
-  myAddressText.textContent = 'not_initialized.b32.i2p';
-  
-  // Reset submitting buttons
-  const loginSubmit = document.getElementById('btn-login-submit');
-  loginSubmit.removeAttribute('disabled');
-  loginSubmit.textContent = 'LOGIN';
-  
-  addLocalLog('Node de-initialized. Session closed.', 'system');
+function enterOffline() {
+  init = false;
+  DOM['auth-card'].style.display = 'block';
+  DOM['transfer-card'].style.display = 'none';
+  DOM['transfers-card'].style.display = 'none';
+  DOM['status-dot'].classList.remove('online');
+  DOM['status-label'].textContent = 'OFFLINE';
+  DOM['btn-logout'].style.display = 'none';
+  DOM['address-banner-section'].style.display = 'none';
+  DOM['my-address-text'].textContent = 'not_online';
+  const loginBtn = document.getElementById('btn-login-submit');
+  loginBtn.removeAttribute('disabled');
+  loginBtn.textContent = 'LOGIN';
+  log('Node offline.', 'sys');
 }
 
-btnLogout.addEventListener('click', async () => {
-  if (!confirm('De-initialize active node session? This stops your receiver tunnel.')) return;
-  addLocalLog('De-initializing node session...', 'system');
+DOM['btn-logout'].addEventListener('click', async () => {
+  if (!confirm('De-initialize node? This stops your receiver tunnel.')) return;
+  log('De-initializing...', 'sys');
   try {
-    const response = await fetch('/api/logout', { method: 'POST' });
-    const result = await response.json();
-    if (response.ok && result.status === 'success') {
-      enterOfflineState();
-    } else {
-      addLocalLog('Logout failed: ' + (result.message || 'Unknown error'), 'error');
-    }
-  } catch (err) {
-    addLocalLog('Network failure during logout: ' + err.message, 'error');
-  }
+    const res = await fetch('/api/logout', {method: 'POST'});
+    const r = await res.json();
+    if (res.ok && r.status === 'success') enterOffline();
+    else log('Logout failed', 'error');
+  } catch (e) {log('Logout failed: ' + e.message, 'error');}
 });
 
-// Dispatch Payload (Send File)
-transferForm.addEventListener('submit', async (e) => {
+DOM['transfer-form'].addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!selectedFile) return;
-
-  const recipient = document.getElementById('transfer-recipient').value.trim();
-  
-  btnSendSubmit.setAttribute('disabled', 'true');
-  btnSendSubmit.textContent = 'DISPATCHING PAYLOAD...';
-  addLocalLog(`Preparing to send '${selectedFile.name}' to '${recipient}'...`, 'system');
-
-  // Convert file to Base64 to transmit cleanly over HTTP without multi-part packages
+  if (!file) return;
+  const recip = document.getElementById('transfer-recipient').value.trim();
+  DOM['btn-send-submit'].setAttribute('disabled', 'true');
+  DOM['btn-send-submit'].textContent = 'DISPATCHING...';
+  log(`Sending '${file.name}' to '${recip}'...`, 'sys');
   const reader = new FileReader();
   reader.onload = async () => {
-    const base64Data = reader.result.split(',')[1];
-    
+    const b64 = reader.result.split(',')[1];
     try {
-      const response = await fetch('/api/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          recipient: recipient,
-          filename: selectedFile.name,
-          fileData: base64Data
-        })
-      });
-      
-      const result = await response.json();
-      if (response.ok && result.status === 'success') {
-        addLocalLog(`Payload '${selectedFile.name}' queued. Streaming to '${recipient}' gestart.`, 'system');
-        clearSelectedFile();
+      const res = await fetch('/api/send', {method: 'POST', headers: {'Content-Type': 'application/json'}, 
+        body: JSON.stringify({recipient: recip, filename: file.name, fileData: b64})});
+      const r = await res.json();
+      if (res.ok && r.status === 'success') {
+        log(r.message, 'sys');
+        clrFile();
       } else {
-        addLocalLog(`Transmission failed: ${result.message || 'Unknown error'}`, 'error');
+        log(`Send failed: ${r.message || 'Unknown'}`, 'error');
       }
-    } catch (err) {
-      addLocalLog(`Transmission failed: ${err.message}`, 'error');
-    } finally {
-      btnSendSubmit.removeAttribute('disabled');
-      btnSendSubmit.textContent = 'INITIATE SECURE STREAM';
-    }
+    } catch (e) {log(`Send failed: ${e.message}`, 'error');}
+    DOM['btn-send-submit'].removeAttribute('disabled');
+    DOM['btn-send-submit'].textContent = 'SEND';
   };
-  
   reader.onerror = () => {
-    addLocalLog('Failed to read selected local file.', 'error');
-    btnSendSubmit.removeAttribute('disabled');
-    btnSendSubmit.textContent = 'INITIATE SECURE STREAM';
+    log('Read file failed', 'error');
+    DOM['btn-send-submit'].removeAttribute('disabled');
+    DOM['btn-send-submit'].textContent = 'SEND';
   };
-  
-  reader.readAsDataURL(selectedFile);
+  reader.readAsDataURL(file);
 });
 
-// Fetch Received Files List
-async function loadReceivedFiles() {
+async function loadFiles() {
   try {
-    const response = await fetch('/api/files');
-    const result = await response.json();
-    if (response.ok && result.status === 'success') {
-      filesTableBody.innerHTML = '';
-      if (result.files.length === 0) {
-        filesTableBody.innerHTML = `<tr><td colspan="3" class="text-center empty-cabinet">No files received yet.</td></tr>`;
-        return;
-      }
-      
-      result.files.forEach(file => {
-        const row = document.createElement('tr');
-        
-        const nameCell = document.createElement('td');
-        nameCell.textContent = file.name;
-        nameCell.style.fontWeight = '500';
-        
-        const sizeCell = document.createElement('td');
-        const sizeKB = file.size / 1024;
-        sizeCell.textContent = sizeKB < 1024 ? `${sizeKB.toFixed(1)} KB` : `${(sizeKB / 1024).toFixed(1)} MB`;
-        sizeCell.className = 'font-mono';
-        
-        const actionCell = document.createElement('td');
-        const downloadButton = document.createElement('button');
-        downloadButton.type = 'button';
-        downloadButton.className = 'btn btn-secondary btn-xs';
-        downloadButton.textContent = 'GET';
-        downloadButton.addEventListener('click', () => {
-          downloadReceivedFile(file.name);
-        });
-        actionCell.appendChild(downloadButton);
-        
-        row.appendChild(nameCell);
-        row.appendChild(sizeCell);
-        row.appendChild(actionCell);
-        filesTableBody.appendChild(row);
+    const res = await fetch('/api/files');
+    const r = await res.json();
+    if (res.ok && r.status === 'success') {
+      DOM['files-table-body'].innerHTML = '';
+      if (r.files.length === 0) {DOM['files-table-body'].innerHTML = '<tr><td colspan="4">No files</td></tr>';}
+      r.files.forEach(f => {
+        const row = DOM['files-table-body'].insertRow();
+        row.innerHTML = `<td>${f.name}</td><td>${(f.size / 1024).toFixed(1)} KB</td><td>${new Date(f.mtime).toLocaleString()}</td><td><button class="btn btn-sm" onclick="dlFile('${f.name}')">Download</button></td>`;
       });
     }
-  } catch (err) {
-    console.error('Failed to load cabinet files:', err);
-  }
+  } catch (e) {console.error('Load files failed', e);}
 }
 
-btnRefreshFiles.addEventListener('click', loadReceivedFiles);
+DOM['btn-refresh-files'].addEventListener('click', loadFiles);
 
-// Live Logs & Status Polling Loop
-const loadingOverlay = document.getElementById('loading-overlay');
-const loadingStatusText = document.getElementById('loading-status-text');
-
-function startStatusPolling() {
-  if (statusIntervalId) clearInterval(statusIntervalId);
-  
-  statusIntervalId = setInterval(async () => {
+function startPoll() {
+  if (statusInt) clearInterval(statusInt);
+  statusInt = setInterval(async () => {
     try {
-      const response = await fetch(`/api/status?offset=${logOffset}`);
-      const result = await response.json();
-      
-      if (response.ok && result.status === 'success') {
-        // 1. Connection Overlay Block management
-        if (result.i2pStatus === 'online') {
-          if (loadingOverlay) {
-            loadingOverlay.style.opacity = '0';
-            setTimeout(() => {
-              loadingOverlay.style.display = 'none';
-            }, 400);
-          }
-          
-          if (isNodeInitialized) {
-            if (result.myBase32Address) {
-              myAddressText.textContent = result.myBase32Address;
-            } else {
-              myAddressText.textContent = 'Starting I2P tunnels...';
-            }
-          }
-        } else {
-          if (loadingOverlay) {
-            loadingOverlay.style.display = 'flex';
-            loadingOverlay.style.opacity = '1';
-            
-            if (result.i2pStatus === 'starting') {
-              loadingStatusText.textContent = 'Launching I2P daemon & SAM bridge...';
-            } else if (result.i2pStatus === 'error') {
-              loadingStatusText.textContent = 'I2P Error: ' + (result.i2pError || 'Unknown error');
-            } else {
-              loadingStatusText.textContent = 'Checking network status...';
-            }
-          }
-        }
-
-        // 2. Append new console logs
-        if (result.logs && result.logs.length > 0) {
-          result.logs.forEach(log => {
-            const line = document.createElement('div');
-            // Determine type
-            let logType = 'system';
-            if (log.includes('[FOUT]') || log.includes('error') || log.includes('mislukt') || log.includes('failed') || log.includes('[PHP FOUT]') || log.includes('[HACK POGING]')) {
-              logType = 'error';
-            }
-            line.className = `log-line ${logType}-line`;
-            line.textContent = log;
-            consoleOutput.appendChild(line);
-            logOffset++;
+      const res = await fetch(`/api/status?offset=${logOff}`);
+      const r = await res.json();
+      if (res.ok && r.status === 'success') {
+        if (r.logs && r.logs.length > 0) {
+          r.logs.forEach(l => {
+            const p = l.split('[') || [];
+            const type = l.includes('[ERR]') ? 'error' : 'sys';
+            DOM['console-output'].appendChild((() => {
+              const d = document.createElement('div');
+              d.className = `log-line ${type}-line`;
+              d.textContent = l;
+              return d;
+            })());
           });
-          consoleOutput.scrollTop = consoleOutput.scrollHeight;
+          DOM['console-output'].scrollTop = DOM['console-output'].scrollHeight;
+          logOff += r.logs.length;
         }
-
-        // 3. Render active transfers
-        if (result.isOnline && result.activeTransfers) {
-          renderActiveTransfers(result.activeTransfers);
-        }
-
-        // 4. Periodically refresh file list automatically if state is online
-        if (result.isOnline && result.hasNewFiles) {
-          loadReceivedFiles();
-        }
+        
+        if (!init) return;
+        if (r.isOnline !== init) {if (!r.isOnline) enterOffline();}
+        if (r.myBase32Address) DOM['my-address-text'].textContent = r.myBase32Address;
+        
+        render(r.activeTransfers);
       }
-    } catch (err) {
-      console.error('Polling error:', err);
-    }
+    } catch (e) {console.error('Poll error', e);}
   }, 1500);
 }
 
-// Clear Logs locally
-btnClearLogs.addEventListener('click', () => {
-  consoleOutput.innerHTML = '';
+DOM['btn-clear-logs'].addEventListener('click', () => DOM['console-output'].innerHTML = '');
+
+DOM['btn-shutdown-node'].addEventListener('click', async () => {
+  if (!confirm('Terminate node and tunnels?')) return;
+  log('Terminating...', 'sys');
+  if (statusInt) clearInterval(statusInt);
+  try {await fetch('/api/shutdown', {method: 'POST'});} catch (e) {}
+  DOM['status-dot'].classList.remove('online');
+  DOM['status-label'].textContent = 'TERMINATED';
+  log('Node offline.', 'sys');
+  DOM['btn-shutdown-node'].setAttribute('disabled', 'true');
 });
 
-// Shutdown Node completely
-btnShutdownNode.addEventListener('click', async () => {
-  if (!confirm('Are you sure you want to terminate the application node and all tunnels?')) return;
-  
-  addLocalLog('Sending termination sequence to daemon...', 'system');
-  if (statusIntervalId) clearInterval(statusIntervalId);
-  
+async function chkStartup() {
   try {
-    await fetch('/api/shutdown', { method: 'POST' });
-  } catch (e) {
-    // Expected as server goes offline
-  }
-  
-  // Update state UI
-  statusDot.classList.remove('online');
-  statusLabel.textContent = 'TERMINATED';
-  addLocalLog('Node connection offline. Process exited.', 'system');
-  btnShutdownNode.setAttribute('disabled', 'true');
-});
-
-// --- Initialization check on page load (Restores session if active) ---
-async function checkCurrentStatusOnStartup() {
-  try {
-    const response = await fetch('/api/status?offset=0');
-    const result = await response.json();
-    if (response.ok && result.status === 'success') {
-      if (result.isOnline && result.username) {
-        addLocalLog('Existing node connection detected. Restoring session...', 'system');
-        enterOnlineState(result.username, result.myBase32Address);
-      }
+    const res = await fetch('/api/status?offset=0');
+    const r = await res.json();
+    if (res.ok && r.status === 'success' && r.isOnline && r.username) {
+      enterOnline(r.username, r.myBase32Address);
     }
-  } catch (e) {
-    console.error('Startup status check failed:', e);
-  }
+  } catch (e) {console.error('Startup check failed', e);}
 }
 
-// Start continuous polling and startup checks
-startStatusPolling();
-checkCurrentStatusOnStartup();
+startPoll();
+chkStartup();
 
-function renderActiveTransfers(transfers) {
-  const transfersCard = document.getElementById('transfers-card');
-  const transfersList = document.getElementById('transfers-list');
+function render(transfers) {
+  const sends = Object.entries(transfers.sends || []);
+  const recvs = Object.entries(transfers.receives || []);
+  const total = sends.length + recvs.length;
+  if (total === 0) {DOM['transfers-card'].style.display = 'none'; return;}
+  DOM['transfers-card'].style.display = 'block';
+  DOM['transfers-list'].innerHTML = '';
   
-  const allSends = Object.entries(transfers.sends || {});
-  const allReceives = Object.entries(transfers.receives || {});
-  const totalTransfersCount = allSends.length + allReceives.length;
-
-  if (totalTransfersCount === 0) {
-    transfersCard.style.display = 'none';
-    return;
-  }
-
-  transfersCard.style.display = 'block';
-  transfersList.innerHTML = '';
-
-  // Render sends
-  allSends.forEach(([id, t]) => {
-    const item = createTransferItemHTML('UPLOAD', t.filename, t.target, t.sent, t.size, t.status, id);
-    transfersList.appendChild(item);
-  });
-
-  // Render receives
-  allReceives.forEach(([id, t]) => {
-    const item = createTransferItemHTML('DOWNLOAD', t.filename, t.sender, t.received, t.size, t.status, id);
-    transfersList.appendChild(item);
-  });
-}
-
-function escapeHTML(str) {
-  if (typeof str !== 'string') return str;
-  return str.replace(/[&<>"'/]/g, function (s) {
-    const entityMap = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
-      '/': '&#x2F;'
-    };
-    return entityMap[s];
-  });
-}
-
-function createTransferItemHTML(direction, filename, peer, current, total, status, id) {
-  const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
-  
-  const div = document.createElement('div');
-  div.className = 'transfer-item';
-
-  const directionSymbol = direction === 'UPLOAD' ? '&uarr;' : '&darr;';
-
-  const currentFormatted = formatBytes(current);
-  const totalFormatted = formatBytes(total);
-
-  let actionsHtml = '';
-  if (status === 'waiting_approval' && direction === 'DOWNLOAD') {
-    actionsHtml = `
-      <div class="transfer-actions" style="margin-top: 8px; display: flex; gap: 8px;">
-        <button class="btn btn-primary btn-xs btn-accept" data-id="${id}" style="padding: 4px 8px; font-size: 10px;">ACCEPT</button>
-        <button class="btn btn-danger btn-xs btn-decline" data-id="${id}" style="padding: 4px 8px; font-size: 10px;">DECLINE</button>
+  sends.forEach(([id, t]) => {
+    const pct = t.size > 0 ? Math.min(100, Math.round((t.sent / t.size) * 100)) : 0;
+    const div = document.createElement('div');
+    div.className = 'transfer-item';
+    div.innerHTML = `
+      <div class="transfer-meta">
+        <span class="transfer-name" title="${t.filename}">&uarr; ${t.filename}</span>
+        <span class="transfer-status-text ${t.status}">${t.status.replace('_', ' ').toUpperCase()}</span>
+      </div>
+      <div class="transfer-progress-bar ${t.status}"><div class="transfer-fill" style="width: ${pct}%"></div></div>
+      <div class="transfer-stats">
+        <span>SEND: ${t.target}</span>
+        <span>${pct}% (${fmt(t.sent)} / ${fmt(t.size)})</span>
       </div>
     `;
-  }
-
-  const escapedFilename = escapeHTML(filename);
-  const escapedPeer = escapeHTML(peer);
-
-  div.innerHTML = `
-    <div class="transfer-meta">
-      <span class="transfer-name" title="${escapedFilename}">${directionSymbol} ${escapedFilename}</span>
-      <span class="transfer-status-text ${status}">${status.replace('_', ' ').toUpperCase()}</span>
-    </div>
-    <div class="transfer-progress-bar ${status}">
-      <div class="transfer-fill" style="width: ${pct}%"></div>
-    </div>
-    <div class="transfer-stats">
-      <span>${direction}: ${escapedPeer}</span>
-      <span>${pct}% (${currentFormatted} / ${totalFormatted})</span>
-    </div>
-    ${actionsHtml}
-  `;
-
-  const acceptBtn = div.querySelector('.btn-accept');
-  const declineBtn = div.querySelector('.btn-decline');
-
-  if (acceptBtn) {
-    acceptBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      acceptBtn.disabled = true;
-      if (declineBtn) declineBtn.disabled = true;
-      acceptBtn.textContent = 'ACCEPTING...';
-      try {
-        const response = await fetch('/api/accept', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ transferId: id })
-        });
-        const result = await response.json();
-        if (!response.ok || result.status !== 'success') {
-          addLocalLog('Failed to accept transfer: ' + (result.message || 'Unknown error'), 'error');
-        }
-      } catch (err) {
-        addLocalLog('Failed to accept transfer: ' + err.message, 'error');
-      }
-    });
-  }
-
-  if (declineBtn) {
-    declineBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      declineBtn.disabled = true;
-      if (acceptBtn) acceptBtn.disabled = true;
-      declineBtn.textContent = 'DECLINING...';
-      try {
-        const response = await fetch('/api/decline', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ transferId: id })
-        });
-        const result = await response.json();
-        if (!response.ok || result.status !== 'success') {
-          addLocalLog('Failed to decline transfer: ' + (result.message || 'Unknown error'), 'error');
-        }
-      } catch (err) {
-        addLocalLog('Failed to decline transfer: ' + err.message, 'error');
-      }
-    });
-  }
-
-  return div;
+    DOM['transfers-list'].appendChild(div);
+  });
+  
+  recvs.forEach(([id, t]) => {
+    const pct = t.size > 0 ? Math.min(100, Math.round((t.got / t.size) * 100)) : 0;
+    const div = document.createElement('div');
+    div.className = 'transfer-item';
+    let html = `
+      <div class="transfer-meta">
+        <span class="transfer-name" title="${t.filename}">&darr; ${t.filename}</span>
+        <span class="transfer-status-text ${t.status}">${t.status.replace('_', ' ').toUpperCase()}</span>
+      </div>
+      <div class="transfer-progress-bar ${t.status}"><div class="transfer-fill" style="width: ${pct}%"></div></div>
+      <div class="transfer-stats">
+        <span>RECV: ${t.sender}</span>
+        <span>${pct}% (${fmt(t.got)} / ${fmt(t.size)})</span>
+      </div>
+    `;
+    if (t.status === 'waiting') {
+      html += `
+        <div class="transfer-actions" style="margin-top: 8px; display: flex; gap: 8px;">
+          <button class="btn btn-primary btn-xs" onclick="accept('${id}')">ACCEPT</button>
+          <button class="btn btn-danger btn-xs" onclick="decline('${id}')">DECLINE</button>
+        </div>
+      `;
+    }
+    div.innerHTML = html;
+    DOM['transfers-list'].appendChild(div);
+  });
 }
 
-function formatBytes(bytes) {
+function fmt(bytes) {
   if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'], i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+async function accept(id) {
+  try {
+    const res = await fetch('/api/accept', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({transferId: id})});
+    const r = await res.json();
+    if (res.ok && r.status === 'success') log('Transfer accepted', 'sys');
+    else log('Accept failed', 'error');
+  } catch (e) {log('Accept failed: ' + e.message, 'error');}
+}
+
+async function decline(id) {
+  try {
+    const res = await fetch('/api/decline', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({transferId: id})});
+    const r = await res.json();
+    if (res.ok && r.status === 'success') log('Transfer declined', 'sys');
+    else log('Decline failed', 'error');
+  } catch (e) {log('Decline failed: ' + e.message, 'error');}
 }
