@@ -128,7 +128,10 @@ btnCopyAddress.addEventListener('click', () => {
 });
 
 // --- Drag and Drop Interface ---
-dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('click', (e) => {
+  if (e.target === fileInput) return;
+  fileInput.click();
+});
 
 dropzone.addEventListener('dragover', (e) => {
   e.preventDefault();
@@ -154,6 +157,13 @@ fileInput.addEventListener('change', () => {
 });
 
 function handleFileSelection(file) {
+  const filenameRegex = /^[a-zA-Z0-9_\-\. ]+$/;
+  if (!filenameRegex.test(file.name)) {
+    addLocalLog(`Bestand geweigerd: De bestandsnaam '${file.name}' bevat ongeldige tekens. Alleen letters, cijfers, underscores (_), streepjes (-), punten (.) en spaties zijn toegestaan.`, 'error');
+    alert(`Bestand geweigerd: De bestandsnaam '${file.name}' bevat ongeldige tekens.\n\nAlleen letters, cijfers, underscores (_), streepjes (-), punten (.) en spaties zijn toegestaan.`);
+    clearSelectedFile();
+    return;
+  }
   selectedFile = file;
   selectedFileName.textContent = file.name;
   
@@ -593,6 +603,21 @@ function renderActiveTransfers(transfers) {
   });
 }
 
+function escapeHTML(str) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/[&<>"'/]/g, function (s) {
+    const entityMap = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+      '/': '&#x2F;'
+    };
+    return entityMap[s];
+  });
+}
+
 function createTransferItemHTML(direction, filename, peer, current, total, status, id) {
   const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
   
@@ -614,16 +639,19 @@ function createTransferItemHTML(direction, filename, peer, current, total, statu
     `;
   }
 
+  const escapedFilename = escapeHTML(filename);
+  const escapedPeer = escapeHTML(peer);
+
   div.innerHTML = `
     <div class="transfer-meta">
-      <span class="transfer-name" title="${filename}">${directionSymbol} ${filename}</span>
+      <span class="transfer-name" title="${escapedFilename}">${directionSymbol} ${escapedFilename}</span>
       <span class="transfer-status-text ${status}">${status.replace('_', ' ').toUpperCase()}</span>
     </div>
     <div class="transfer-progress-bar ${status}">
       <div class="transfer-fill" style="width: ${pct}%"></div>
     </div>
     <div class="transfer-stats">
-      <span>${direction}: ${peer}</span>
+      <span>${direction}: ${escapedPeer}</span>
       <span>${pct}% (${currentFormatted} / ${totalFormatted})</span>
     </div>
     ${actionsHtml}
