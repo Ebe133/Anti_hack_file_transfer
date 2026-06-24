@@ -1221,8 +1221,9 @@ function checkAndInstallI2P(callback) {
             file.close(() => {
               console.log('[I2P Manager] Download voltooid. Uitpakken van ZIP via PowerShell...');
               try {
-                // Uitpakken met PowerShell Expand-Archive
-                execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${binDir}' -Force"`);
+                const escapedZipPath = zipPath.replace(/'/g, "''");
+                const escapedBinDir = binDir.replace(/'/g, "''");
+                execSync(`powershell -Command "Expand-Archive -Path '${escapedZipPath}' -DestinationPath '${escapedBinDir}' -Force"`);
                 fs.unlinkSync(zipPath); // Verwijder de ZIP
 
                 // Zoek recursief naar i2pd.exe (in het geval van een geneste ZIP structuur)
