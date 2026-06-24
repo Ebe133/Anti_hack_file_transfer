@@ -27,9 +27,11 @@ $authStateFile = $dataDir . '/auth_state.db.json';
 
 if (!file_exists($userDbFile)) {
     file_put_contents($userDbFile, json_encode([]));
+    @chmod($userDbFile, 0600);
 }
 if (!file_exists($sessionDbFile)) {
     file_put_contents($sessionDbFile, json_encode([]));
+    @chmod($sessionDbFile, 0600);
 }
 
 function loadJsonFile(string $filePath, array $fallback = []): array {
@@ -75,15 +77,36 @@ function saveJsonFile(string $filePath, array $data): void {
         return;
     }
 
+    $bytesWritten = 0;
     if (@flock($fp, LOCK_EX)) {
-        fwrite($fp, $json);
+        $bytesWritten = fwrite($fp, $json);
         fflush($fp);
         @flock($fp, LOCK_UN);
     }
     fclose($fp);
 
-    @rename($tmpFile, $filePath);
-    @chmod($filePath, 0600);
+    if ($bytesWritten === strlen($json)) {
+        @rename($tmpFile, $filePath);
+        @chmod($filePath, 0600);
+    } else {
+        @unlink($tmpFile);
+        serverLog("Fout bij opslaan database: Schrijven naar tijdelijk bestand is mislukt (mogelijke schijf vol). Bewerking afgebroken.");
+    }
+}
+
+function serverLog(string $msg): void {
+    if (PHP_SAPI === 'cli') {
+        echo $msg . "\n";
+    } else {
+        error_log($msg);
+    }
+}
+
+function releaseDbLock($lockFp): void {
+    if ($lockFp) {
+        flock($lockFp, LOCK_UN);
+        fclose($lockFp);
+    }
 }
 
 function jsonResponse(array $data, int $statusCode = 200): void {
@@ -91,6 +114,8 @@ function jsonResponse(array $data, int $statusCode = 200): void {
     header('Content-Type: application/json; charset=utf-8');
     header('X-Content-Type-Options: nosniff');
     header('Cache-Control: no-store');
+    header('Content-Security-Policy: default-src \'none\'; frame-ancestors \'none\';');
+    header('X-Frame-Options: DENY');
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
 }
 
@@ -137,7 +162,7 @@ function enforceRateLimit(string $ip, string $authStateFile): ?array {
     return null;
 }
 
-function recordLoginResult(string $ip, bool $success, string $authStateFile): void {
+function recordLoginResult(string $ip, bool $success, string $authStateFile, string $username = ''): void {
     $state = loadJsonFile($authStateFile, []);
     $now = time();
 
@@ -158,6 +183,7 @@ function recordLoginResult(string $ip, bool $success, string $authStateFile): vo
         if ($failed >= 5) {
             $state[$ip]['blocked_until'] = $now + 900;
             $state[$ip]['failed_logins'] = 0;
+            serverLog("[$ip] [HACK POGING] Brute-force gedetecteerd voor gebruiker: $username. IP geblokkeerd voor 15 minuten.");
         }
     }
 
@@ -178,6 +204,7 @@ function verwerkActie(array $data, string $ip, array &$gebruikers, array &$sessi
     if (isset($data['username'])) {
         $checkUser = trim((string)$data['username']);
         if ($checkUser !== '' && !preg_match('/^[a-zA-Z0-9_\-]+$/', $checkUser)) {
+            serverLog("[$ip] [HACK POGING] Verdachte/ongeldige tekens in gebruikersnaam: '$checkUser'");
             return ['status' => 'error', 'message' => 'Gebruikersnaam bevat ongeldige tekens'];
         }
     }
@@ -186,6 +213,7 @@ function verwerkActie(array $data, string $ip, array &$gebruikers, array &$sessi
     if (isset($data['session_token'])) {
         $checkToken = trim((string)$data['session_token']);
         if ($checkToken !== '' && !preg_match('/^[0-9a-fA-F]{32}$/', $checkToken)) {
+            serverLog("[$ip] [HACK POGING] Ongeldig sessietoken formaat gedetecteerd: '$checkToken'");
             return ['status' => 'error', 'message' => 'Ongeldig sessietoken'];
         }
     }
@@ -194,6 +222,7 @@ function verwerkActie(array $data, string $ip, array &$gebruikers, array &$sessi
     if (isset($data['address'])) {
         $checkAddress = trim((string)$data['address']);
         if ($checkAddress !== '' && preg_match('/[\'"<>;()\\$]/', $checkAddress)) {
+            serverLog("[$ip] [HACK POGING] Mogelijk injectie-payload in adres gedetecteerd: '$checkAddress'");
             return ['status' => 'error', 'message' => 'Ongeldig adresformaat'];
         }
     }
@@ -234,11 +263,17 @@ function verwerkActie(array $data, string $ip, array &$gebruikers, array &$sessi
             $pass = (string)($data['password'] ?? '');
             $adres = trim((string)($data['address'] ?? ''));
 
-            if (!isset($gebruikers[$user]) || !password_verify($pass, (string)$gebruikers[$user])) {
+            $dummyHash = '$2y$10$reZ1lKex5oG1U1W1E1E1Eu1V1E1E1E1E1E1E1E1E1E1E1E1E1E1E1';
+            $userExists = isset($gebruikers[$user]);
+            $hashToVerify = $userExists ? (string)$gebruikers[$user] : $dummyHash;
+
+            if (!password_verify($pass, $hashToVerify) || !$userExists) {
+                serverLog("[$ip] Mislukte inlogpoging voor: $user");
                 return ['status' => 'error', 'message' => 'Ongeldige inloggegevens'];
             }
 
             if ($adres !== '' && !preg_match('/^[a-z2-7]{52}\.b32\.i2p$/', $adres)) {
+                serverLog("[$ip] [HACK POGING] Update adres mislukt: adres is leeg of is geen geldig I2P Base32 adres: '$adres'");
                 return ['status' => 'error', 'message' => 'Ongeldig I2P-adres formaat'];
             }
 
@@ -264,6 +299,7 @@ function verwerkActie(array $data, string $ip, array &$gebruikers, array &$sessi
             }
 
             if ($adres === '' || !preg_match('/^[a-z2-7]{52}\.b32\.i2p$/', $adres)) {
+                serverLog("[$ip] [HACK POGING] Update adres mislukt: adres is leeg of is geen geldig I2P Base32 adres: '$adres'");
                 return ['status' => 'error', 'message' => 'Geldig I2P Base32 adres (.b32.i2p) is verplicht'];
             }
 
@@ -301,6 +337,52 @@ function verwerkActie(array $data, string $ip, array &$gebruikers, array &$sessi
                 'address' => $sessies[$doelGebruiker]['address'],
             ];
 
+        case 'verify_session':
+            $mijnToken = (string)($data['session_token'] ?? '');
+            $checkGebruiker = trim((string)($data['username'] ?? ''));
+
+            if ($checkGebruiker === '' || !preg_match('/^[a-zA-Z0-9_\-]+$/', $checkGebruiker)) {
+                serverLog("[$ip] [HACK POGING] Sessie verificatie mislukt: gebruikersnaam bevat ongeldige tekens: '$checkGebruiker'");
+                return ['status' => 'error', 'message' => 'Gebruikersnaam bevat ongeldige tekens'];
+            }
+
+            if (!valideerSessie($mijnToken, $sessies)) {
+                serverLog("[$ip] [HACK POGING] Sessie verificatie mislukt: token '$mijnToken' is ongeldig of verlopen voor gebruiker '$checkGebruiker'");
+                return ['status' => 'error', 'message' => 'Sessie is ongeldig of verlopen'];
+            }
+
+            // Check if token belongs to the given username
+            if (!isset($sessies[$checkGebruiker]) || !hash_equals((string)$sessies[$checkGebruiker]['token'], $mijnToken)) {
+                serverLog("[$ip] [HACK POGING] Sessie verificatie mislukt: token '$mijnToken' komt niet overeen met gebruiker '$checkGebruiker'");
+                return ['status' => 'error', 'message' => 'Sessie komt niet overeen met gebruiker'];
+            }
+
+            return ['status' => 'success', 'message' => 'Sessie is geldig'];
+
+        case 'report_offline':
+            $mijnToken = (string)($data['session_token'] ?? '');
+            $doelGebruiker = trim((string)($data['target'] ?? ''));
+
+            if ($doelGebruiker === '' || !preg_match('/^[a-zA-Z0-9_\-]+$/', $doelGebruiker)) {
+                return ['status' => 'error', 'message' => 'Gebruikersnaam bevat ongeldige tekens'];
+            }
+
+            if (!valideerSessie($mijnToken, $sessies)) {
+                return ['status' => 'error', 'message' => 'Sessie is ongeldig of verlopen'];
+            }
+
+            // Beveiliging: Alleen de gebruiker zelf mag zijn eigen sessie offline melden
+            if (isset($sessies[$doelGebruiker])) {
+                if (!hash_equals((string)$sessies[$doelGebruiker]['token'], $mijnToken)) {
+                    serverLog("[$ip] [HACK POGING] Ongeautoriseerde poging om gebruiker '$doelGebruiker' offline te melden.");
+                    return ['status' => 'error', 'message' => 'Ongeautoriseerd'];
+                }
+                unset($sessies[$doelGebruiker]);
+                serverLog("[$ip] Gebruiker '$doelGebruiker' offline gemeld.");
+            }
+
+            return ['status' => 'success', 'message' => 'Gebruiker offline gemeld en verwijderd'];
+
         default:
             return ['status' => 'error', 'message' => 'Onbekende actie'];
     }
@@ -313,13 +395,21 @@ if (PHP_SAPI !== 'cli') {
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
+    $lockFile = $dataDir . '/db.lock';
+    $lockFp = fopen($lockFile, 'c');
+    if ($lockFp) {
+        flock($lockFp, LOCK_EX);
+    }
+
     $rateError = enforceRateLimit($ip, $authStateFile);
     if ($rateError !== null) {
+        releaseDbLock($lockFp);
         jsonResponse($rateError, 429);
         exit;
     }
 
     if ($method !== 'POST') {
+        releaseDbLock($lockFp);
         jsonResponse([
             'status' => 'error',
             'message' => 'Gebruik POST met JSON payload.'
@@ -329,12 +419,15 @@ if (PHP_SAPI !== 'cli') {
 
     $raw = file_get_contents('php://input');
     if ($raw !== false && strlen($raw) > 8192) {
+        releaseDbLock($lockFp);
         jsonResponse(['status' => 'error', 'message' => 'Payload te groot'], 413);
         exit;
     }
     $data = json_decode($raw ?? '', true);
 
     if (!is_array($data)) {
+        serverLog("[$ip] [HACK POGING] Ongeldige JSON-payload of HTTP-probe ontvangen: " . json_encode($raw));
+        releaseDbLock($lockFp);
         jsonResponse(['status' => 'error', 'message' => 'Ongeldig JSON-formaat'], 400);
         exit;
     }
@@ -342,11 +435,11 @@ if (PHP_SAPI !== 'cli') {
     $gebruikers = loadJsonFile($userDbFile, []);
     $sessies = loadJsonFile($sessionDbFile, []);
 
-    // Verwijder zeer oude sessies (24 uur)
+    // Verwijder inactieve sessies (3 minuten)
     $now = time();
     foreach ($sessies as $user => $info) {
         $updatedAt = isset($info['updated_at']) ? (int)$info['updated_at'] : 0;
-        if ($updatedAt > 0 && ($now - $updatedAt) > 86400) {
+        if ($updatedAt > 0 && ($now - $updatedAt) > 180) {
             unset($sessies[$user]);
         }
     }
@@ -355,12 +448,14 @@ if (PHP_SAPI !== 'cli') {
 
     $actie = isset($data['action']) ? (string)$data['action'] : '';
     if ($actie === 'login') {
-        recordLoginResult($ip, (($response['status'] ?? 'error') === 'success'), $authStateFile);
+        $user = trim((string)($data['username'] ?? ''));
+        recordLoginResult($ip, (($response['status'] ?? 'error') === 'success'), $authStateFile, $user);
     }
 
     saveJsonFile($userDbFile, $gebruikers);
     saveJsonFile($sessionDbFile, $sessies);
 
+    releaseDbLock($lockFp);
     jsonResponse($response, $response['status'] === 'success' ? 200 : 400);
     exit;
 }
@@ -412,14 +507,43 @@ while (true) {
 }
 
 function behandelVerbinding(mixed $socket, string $ip, string $dbFile, array &$sessies): void {
+    global $authStateFile;
+    global $dataDir;
+
+    // Verwijder inactieve sessies (3 minuten) om memory leaks te voorkomen
+    $now = time();
+    foreach ($sessies as $user => $info) {
+        $updatedAt = isset($info['updated_at']) ? (int)$info['updated_at'] : 0;
+        if ($updatedAt > 0 && ($now - $updatedAt) > 180) {
+            unset($sessies[$user]);
+        }
+    }
+
+    $lockFile = $dataDir . '/db.lock';
+    $lockFp = fopen($lockFile, 'c');
+    if ($lockFp) {
+        flock($lockFp, LOCK_EX);
+    }
+
+    $rateError = enforceRateLimit($ip, $authStateFile);
+    if ($rateError !== null) {
+        releaseDbLock($lockFp);
+        stuurAntwoord($socket, $rateError);
+        socket_close($socket);
+        return;
+    }
+
     $verzoek = leesRegel($socket);
     if ($verzoek === false) {
+        releaseDbLock($lockFp);
         socket_close($socket);
         return;
     }
 
     $data = json_decode($verzoek, true);
     if (!is_array($data)) {
+        serverLog("[$ip] [HACK POGING] Ongeldige JSON-payload of HTTP-probe ontvangen: " . json_encode($verzoek));
+        releaseDbLock($lockFp);
         stuurAntwoord($socket, ['status' => 'error', 'message' => 'Ongeldig JSON-formaat']);
         socket_close($socket);
         return;
@@ -429,6 +553,13 @@ function behandelVerbinding(mixed $socket, string $ip, string $dbFile, array &$s
     $response = verwerkActie($data, $ip, $gebruikers, $sessies);
     saveJsonFile($dbFile, $gebruikers);
 
+    $actie = isset($data['action']) ? (string)$data['action'] : '';
+    if ($actie === 'login') {
+        $user = trim((string)($data['username'] ?? ''));
+        recordLoginResult($ip, (($response['status'] ?? 'error') === 'success'), $authStateFile, $user);
+    }
+
+    releaseDbLock($lockFp);
     stuurAntwoord($socket, $response);
     socket_close($socket);
 }
